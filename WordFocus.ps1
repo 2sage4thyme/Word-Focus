@@ -2,11 +2,14 @@
 # Required Notice: Copyright 2sage4thyme (https://github.com/2sage4thyme)
 # License: Big Time Public License 2.0.2 - https://bigtimelicense.com/versions/2.0.2 (see LICENSE.md)
 #   Ctrl+Alt+H  = turn highlight on/off
-#   Ctrl+Alt+K  = open settings (word-count slider, ombre on/off)
+#   Ctrl+Alt+K  = open settings (word count, highlight strength, ombre on/off, color)
+#   Hotkeys can be changed, and optional more/fewer-words keys added, in Settings > Advanced.
 #   Tray icon (bottom-right) -> Exit to quit.
 # What this script does: compiles the C# code below in memory (using Windows' built-in
-# compiler), then runs it. It installs nothing, writes no files, changes no settings,
-# and does not start with Windows. It only reads the text under your mouse through
+# compiler), then runs it. It installs nothing and changes no system settings. The only file
+# it writes is your Word Focus settings (%APPDATA%\WordFocus\settings.txt). It
+# does not start with Windows unless you tick "Start with Windows" in settings
+# (that adds a shortcut to your personal Startup folder; unticking removes it). It only reads the text under your mouse through
 # Windows' accessibility interface (UI Automation) and draws a see-through overlay.
 # While a highlight is showing, it temporarily swaps the arrow, text I-beam and link-hand
 # pointers for see-through copies (in memory only), and puts your normal pointers back
@@ -285,6 +288,9 @@ namespace WordFocus
         private readonly Label sliderLabel;
         private readonly CheckBox ombreBox;
         private readonly CheckBox onBox;
+        private readonly CheckBox startupBox;
+        private readonly TrackBar strength;
+        private readonly Label strengthLabel;
 
         public SettingsForm(Controller c)
         {
@@ -292,7 +298,7 @@ namespace WordFocus
             Text = "Word Focus";
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(320, 210);
+            ClientSize = new Size(320, 300);
             TopMost = true;
 
             onBox = new CheckBox();
@@ -314,17 +320,27 @@ namespace WordFocus
             ombreBox.CheckedChanged += delegate { ctl.SetOmbre(ombreBox.Checked); };
 
             Label hint = new Label();
-            hint.Text = "Ctrl+Alt+K opens this window. Closing it keeps Word Focus running.";
+            hint.Text = "Closing this window keeps Word Focus running.";
             hint.ForeColor = SystemColors.GrayText;
-            hint.SetBounds(14, 182, 300, 20);
+            hint.SetBounds(14, 274, 210, 20);
 
             Controls.Add(onBox); Controls.Add(sliderLabel); Controls.Add(slider);
             Controls.Add(ombreBox); Controls.Add(hint);
 
+            // Highlight strength: how see-through the highlight is (10% = faint, 100% = solid).
+            strengthLabel = new Label();
+            strengthLabel.SetBounds(14, 138, 290, 20);
+            strength = new TrackBar();
+            strength.Minimum = 10; strength.Maximum = 100; strength.TickFrequency = 10;
+            strength.SmallChange = 5; strength.LargeChange = 10;
+            strength.SetBounds(10, 156, 300, 45);
+            strength.ValueChanged += delegate { ctl.SetStrength(strength.Value); UpdateStrengthLabel(); };
+            Controls.Add(strengthLabel); Controls.Add(strength);
+
             // Color row: preset swatches + a "Custom..." button that opens the Windows color picker.
             Label colorLabel = new Label();
             colorLabel.Text = "Color:";
-            colorLabel.SetBounds(14, 146, 42, 20);
+            colorLabel.SetBounds(14, 206, 42, 20);
             Controls.Add(colorLabel);
             Color[] presets = new Color[] {
                 Color.FromArgb(255, 214, 0),   // yellow
@@ -341,7 +357,7 @@ namespace WordFocus
                 Button sw = new Button();
                 sw.FlatStyle = FlatStyle.Flat;
                 sw.BackColor = presets[i];
-                sw.SetBounds(58 + i * 28, 142, 24, 24);
+                sw.SetBounds(58 + i * 28, 202, 24, 24);
                 Color picked = presets[i];
                 sw.Click += delegate { ctl.SetColor(picked); };
                 tips.SetToolTip(sw, names[i]);
@@ -349,7 +365,7 @@ namespace WordFocus
             }
             Button custom = new Button();
             custom.Text = "Custom...";
-            custom.SetBounds(228, 141, 80, 26);
+            custom.SetBounds(228, 201, 80, 26);
             custom.Click += delegate
             {
                 using (ColorDialog dlg = new ColorDialog())
@@ -360,15 +376,45 @@ namespace WordFocus
                 }
             };
             Controls.Add(custom);
+
+            // Start with Windows: adds/removes a shortcut in your personal Startup folder.
+            startupBox = new CheckBox();
+            startupBox.Text = "Start with Windows   (uses your last settings)";
+            startupBox.SetBounds(14, 240, 300, 24);
+            startupBox.Checked = Startup.IsEnabled();
+            startupBox.CheckedChanged += delegate
+            {
+                string err = Startup.Set(startupBox.Checked);
+                if (err != null)
+                {
+                    MessageBox.Show("Couldn't change the Startup shortcut:\n" + err, "Word Focus");
+                    startupBox.Checked = Startup.IsEnabled();
+                }
+            };
+            Controls.Add(startupBox);
+
+            Button adv = new Button();
+            adv.Text = "Advanced...";
+            adv.SetBounds(228, 268, 80, 26);
+            adv.Click += delegate { ctl.ShowAdvanced(); };
+            Controls.Add(adv);
+            if (Controller.AppIcon != null) Icon = Controller.AppIcon;
             SyncFromController();
         }
 
         public void SyncFromController()
         {
             onBox.Checked = ctl.Enabled;
+            onBox.Text = "Highlight on   (" + ctl.KeyText(0) + ")";
             slider.Value = ctl.Count;
             ombreBox.Checked = ctl.Ombre;
+            if (strength != null) { strength.Value = ctl.StrengthPercent; UpdateStrengthLabel(); }
             UpdateLabel();
+        }
+
+        private void UpdateStrengthLabel()
+        {
+            strengthLabel.Text = "Highlight strength: " + strength.Value + "%";
         }
 
         private void UpdateLabel()
@@ -382,6 +428,160 @@ namespace WordFocus
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
+            base.OnFormClosing(e);
+        }
+    }
+
+    // ---- A box that records a key combination when clicked ----
+    public class HotkeyBox : TextBox
+    {
+        private readonly Controller ctl;
+        private readonly int index;
+        private readonly Label status;
+
+        public HotkeyBox(Controller c, int i, Label statusLabel)
+        {
+            ctl = c; index = i; status = statusLabel;
+            ReadOnly = true;
+            BackColor = SystemColors.Window;
+            ShortcutsEnabled = false;
+            Cursor = Cursors.Hand;
+        }
+
+        public void ShowCurrent() { Text = ctl.KeyText(index); }
+
+        protected override void OnEnter(EventArgs e)
+        {
+            ctl.SuspendHotkeys();
+            Text = "Press new keys...";
+            status.ForeColor = SystemColors.GrayText;
+            status.Text = "Hold Ctrl and/or Alt, then press a key. Backspace = none, Esc = cancel.";
+            base.OnEnter(e);
+        }
+
+        protected override void OnLeave(EventArgs e)
+        {
+            ctl.ResumeHotkeys();
+            ShowCurrent();
+            base.OnLeave(e);
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            Keys key = keyData & Keys.KeyCode;
+            Keys mods = keyData & Keys.Modifiers;
+            if (key == Keys.Tab && mods == Keys.None) return base.ProcessCmdKey(ref msg, keyData);
+            if (key == Keys.ShiftKey || key == Keys.ControlKey || key == Keys.Menu || key == Keys.LWin || key == Keys.RWin)
+                return true; // still waiting for the main key
+            if (key == Keys.Escape && mods == Keys.None) { ShowCurrent(); Done(null, "Cancelled."); return true; }
+
+            uint m = 0;
+            if ((mods & Keys.Control) != 0) m |= 2;
+            if ((mods & Keys.Alt) != 0) m |= 1;
+            if ((mods & Keys.Shift) != 0) m |= 4;
+
+            string err;
+            if ((key == Keys.Back || key == Keys.Delete) && mods == Keys.None) err = ctl.SetHotkey(index, 0, 0);
+            else if ((m & 3) == 0) err = "Include Ctrl or Alt, so the hotkey doesn't block normal typing.";
+            else err = ctl.SetHotkey(index, m, (uint)key);
+            ShowCurrent();
+            Done(err, null);
+            return true;
+        }
+
+        private void Done(string err, string note)
+        {
+            status.ForeColor = err == null ? SystemColors.GrayText : Color.Firebrick;
+            status.Text = err ?? note ?? ("Saved: " + Controller.KeyNames[index] + " = " + ctl.KeyText(index));
+            AdvancedForm f = FindForm() as AdvancedForm;
+            if (f != null) f.ReleaseFocus(); // stop recording (turns our hotkeys back on)
+        }
+    }
+
+    // ---- Advanced settings: style + hotkeys ----
+    public class AdvancedForm : Form
+    {
+        private readonly Controller ctl;
+        private readonly RadioButton hlRadio, ulRadio;
+        private readonly HotkeyBox[] boxes = new HotkeyBox[4];
+        private readonly Label status;
+        private readonly Button resetBtn;
+
+        public AdvancedForm(Controller c)
+        {
+            ctl = c;
+            Text = "Word Focus - Advanced";
+            FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            StartPosition = FormStartPosition.CenterScreen;
+            ClientSize = new Size(340, 290);
+            TopMost = true;
+            if (Controller.AppIcon != null) Icon = Controller.AppIcon;
+
+            Label styleLabel = new Label();
+            styleLabel.Text = "Style";
+            styleLabel.Font = new Font(Font, FontStyle.Bold);
+            styleLabel.SetBounds(14, 10, 300, 20);
+            Controls.Add(styleLabel);
+
+            hlRadio = new RadioButton(); hlRadio.Text = "Highlight"; hlRadio.SetBounds(20, 32, 110, 24);
+            ulRadio = new RadioButton(); ulRadio.Text = "Underline"; ulRadio.SetBounds(140, 32, 110, 24);
+            hlRadio.CheckedChanged += delegate { if (hlRadio.Checked) ctl.SetUnderline(false); };
+            ulRadio.CheckedChanged += delegate { if (ulRadio.Checked) ctl.SetUnderline(true); };
+            Controls.Add(hlRadio); Controls.Add(ulRadio);
+
+            Label keysLabel = new Label();
+            keysLabel.Text = "Hotkeys   (click a box, then press the new keys)";
+            keysLabel.Font = new Font(Font, FontStyle.Bold);
+            keysLabel.SetBounds(14, 68, 320, 20);
+            Controls.Add(keysLabel);
+
+            status = new Label();
+            status.ForeColor = SystemColors.GrayText;
+            status.SetBounds(14, 222, 320, 32);
+
+            for (int i = 0; i < 4; i++)
+            {
+                Label l = new Label();
+                l.Text = Controller.KeyNames[i];
+                l.SetBounds(20, 96 + i * 30, 120, 20);
+                Controls.Add(l);
+                boxes[i] = new HotkeyBox(ctl, i, status);
+                boxes[i].SetBounds(150, 93 + i * 30, 170, 22);
+                Controls.Add(boxes[i]);
+            }
+            Controls.Add(status);
+
+            resetBtn = new Button();
+            resetBtn.Text = "Reset hotkeys to defaults";
+            resetBtn.SetBounds(14, 256, 170, 26);
+            resetBtn.Click += delegate
+            {
+                ctl.ResetHotkeys();
+                SyncFromController();
+                status.ForeColor = SystemColors.GrayText;
+                status.Text = "Hotkeys reset: Ctrl+Alt+H, Ctrl+Alt+K, word-count keys off.";
+            };
+            Controls.Add(resetBtn);
+
+            // Make sure our hotkeys come back if this window loses focus while a box is recording.
+            Deactivate += delegate { ActiveControl = resetBtn; ctl.ResumeHotkeys(); };
+        }
+
+        public void ReleaseFocus() { ActiveControl = resetBtn; }
+
+        public void SyncFromController()
+        {
+            hlRadio.Checked = !ctl.Underline;
+            ulRadio.Checked = ctl.Underline;
+            for (int i = 0; i < 4; i++) boxes[i].ShowCurrent();
+            ActiveControl = resetBtn;
+            status.ForeColor = SystemColors.GrayText;
+            status.Text = "Word-count keys are off until you set them (for example Ctrl+Alt+Up / Down).";
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; ctl.ResumeHotkeys(); Hide(); }
             base.OnFormClosing(e);
         }
     }
@@ -410,8 +610,8 @@ namespace WordFocus
     {
         // ===== Easy-to-change defaults =====
         public static Color HighlightColor = Color.FromArgb(255, 214, 0); // yellow
-        public const int MaxAlpha = 150;     // strength of the first word (0-255)
-        public const float FadeTo = 0.15f;   // last word fades to this fraction of MaxAlpha
+        public const int DefaultStrengthPercent = 60; // highlight strength at start-up (10-100)
+        public const float FadeTo = 0.15f;   // last word fades to this fraction of the first word's strength
         public const int LineModeValue = 11; // slider value that means "rest of the line"
         public const float CursorOpacity = 0.10f; // pointer see-through amount while highlighting (0 = invisible, 1 = normal)
         public const int CursorRestoreDelayMs = 700; // keeps the pointer faded while moving across gaps between words
@@ -419,6 +619,7 @@ namespace WordFocus
 
         private volatile bool enabled = false;
         private volatile bool ombre = true;
+        private volatile int strengthPercent = DefaultStrengthPercent;
         private volatile int count = 3;
         private volatile bool dirty = true;
         private volatile bool running = true;
@@ -433,6 +634,110 @@ namespace WordFocus
 
         public bool Enabled { get { return enabled; } }
         public bool Ombre { get { return ombre; } }
+
+        // ---- Style ----
+        private volatile bool underline = false;
+        public bool Underline { get { return underline; } }
+        public void SetUnderline(bool v) { underline = v; dirty = true; settingsChanged = true; }
+
+        // ---- Custom icon: WordFocus.ico beside the script, if present ----
+        public static Icon AppIcon;
+
+        // ---- Hotkeys (index 0..3 -> hotkey id 1..4) ----
+        public static readonly string[] KeyNames = new string[] { "Highlight on/off", "Open settings", "More words", "Fewer words" };
+        // Defaults: Ctrl+Alt+H and Ctrl+Alt+K. Word-count keys are off until set in Settings > Advanced.
+        private static readonly uint[] DefMods = new uint[] { 3, 3, 0, 0 };
+        private static readonly uint[] DefVk = new uint[] { 0x48, 0x4B, 0, 0 };
+        private readonly uint[] keyMods = new uint[] { 3, 3, 0, 0 };
+        private readonly uint[] keyVk = new uint[] { 0x48, 0x4B, 0, 0 };
+        private bool hotkeysSuspended = false;
+        private ToolStripMenuItem toggleItem, settingsItem;
+        private AdvancedForm advanced;
+
+        public static string FormatKey(uint mods, uint vk)
+        {
+            if (vk == 0) return "none";
+            string t = "";
+            if ((mods & 2) != 0) t += "Ctrl+";
+            if ((mods & 1) != 0) t += "Alt+";
+            if ((mods & 4) != 0) t += "Shift+";
+            Keys k = (Keys)vk;
+            string name = k.ToString();
+            if (k >= Keys.D0 && k <= Keys.D9) name = ((int)(k - Keys.D0)).ToString();
+            else if (k == Keys.Up) name = "Up arrow";
+            else if (k == Keys.Down) name = "Down arrow";
+            else if (k == Keys.Left) name = "Left arrow";
+            else if (k == Keys.Right) name = "Right arrow";
+            return t + name;
+        }
+
+        public string KeyText(int i) { return FormatKey(keyMods[i], keyVk[i]); }
+
+        // Registers every hotkey; returns the names of any that another program already uses.
+        private List<string> RegisterAll()
+        {
+            List<string> failed = new List<string>();
+            for (int i = 0; i < keyVk.Length; i++)
+            {
+                Native.UnregisterHotKey(hotkeys.Handle, i + 1);
+                if (keyVk[i] == 0) continue;
+                if (!Native.RegisterHotKey(hotkeys.Handle, i + 1, keyMods[i] | 0x4000, keyVk[i]))
+                    failed.Add(KeyText(i) + " (" + KeyNames[i] + ")");
+            }
+            return failed;
+        }
+
+        private void UnregisterAll()
+        {
+            for (int i = 0; i < keyVk.Length; i++) Native.UnregisterHotKey(hotkeys.Handle, i + 1);
+        }
+
+        // While a hotkey box is recording, our own hotkeys are paused so the keys reach the box.
+        public void SuspendHotkeys() { if (!hotkeysSuspended) { UnregisterAll(); hotkeysSuspended = true; } }
+        public void ResumeHotkeys() { if (hotkeysSuspended) { hotkeysSuspended = false; RegisterAll(); } }
+
+        // Returns null if OK, or a message explaining why the key can't be used.
+        public string SetHotkey(int i, uint mods, uint vk)
+        {
+            if (vk != 0)
+            {
+                for (int j = 0; j < keyVk.Length; j++)
+                    if (j != i && keyVk[j] == vk && keyMods[j] == mods)
+                        return FormatKey(mods, vk) + " is already used for \"" + KeyNames[j] + "\".";
+                // Test whether another program owns it (our own keys are paused while recording).
+                if (!Native.RegisterHotKey(hotkeys.Handle, 99, mods | 0x4000, vk))
+                    return FormatKey(mods, vk) + " is already used by another program.";
+                Native.UnregisterHotKey(hotkeys.Handle, 99);
+            }
+            keyMods[i] = mods; keyVk[i] = vk;
+            settingsChanged = true;
+            if (!hotkeysSuspended) RegisterAll();
+            UpdateKeyLabels();
+            return null;
+        }
+
+        public void ResetHotkeys()
+        {
+            for (int i = 0; i < keyVk.Length; i++) { keyMods[i] = DefMods[i]; keyVk[i] = DefVk[i]; }
+            settingsChanged = true;
+            if (!hotkeysSuspended) RegisterAll();
+            UpdateKeyLabels();
+        }
+
+        private void UpdateKeyLabels()
+        {
+            if (toggleItem != null) toggleItem.Text = "Highlight on/off  (" + KeyText(0) + ")";
+            if (settingsItem != null) settingsItem.Text = "Settings...  (" + KeyText(1) + ")";
+            if (settings != null) settings.SyncFromController();
+        }
+
+        public void ShowAdvanced()
+        {
+            if (advanced == null) advanced = new AdvancedForm(this);
+            advanced.SyncFromController();
+            advanced.Show();
+            advanced.Activate();
+        }
         public int Count { get { return count; } }
 
         public Controller()
@@ -441,6 +746,8 @@ namespace WordFocus
             AppDomain.CurrentDomain.ProcessExit += delegate { RestoreCursor(); };
             AppDomain.CurrentDomain.UnhandledException += delegate { RestoreCursor(); };
             Application.ThreadException += delegate { RestoreCursor(); };
+
+            LoadSettings();
 
             overlay = new Overlay();
             overlay.Show();
@@ -457,25 +764,39 @@ namespace WordFocus
             };
             restoreTimer.Start();
 
+            // Saves changed settings about once a second (so dragging a slider doesn't write constantly).
+            System.Windows.Forms.Timer saveTimer = new System.Windows.Forms.Timer();
+            saveTimer.Interval = 1000;
+            saveTimer.Tick += delegate { if (settingsChanged) SaveSettings(); };
+            saveTimer.Start();
+
             hotkeys = new HotkeyWindow();
             hotkeys.Pressed += OnHotkey;
-            bool ok1 = Native.RegisterHotKey(hotkeys.Handle, 1, 0x2 | 0x1 | 0x4000, 0x48); // Ctrl+Alt+H
-            bool ok2 = Native.RegisterHotKey(hotkeys.Handle, 2, 0x2 | 0x1 | 0x4000, 0x4B); // Ctrl+Alt+K
+            List<string> failed = RegisterAll();
+
+            try
+            {
+                string ico = System.IO.Path.Combine(Startup.Folder ?? "", "WordFocus.ico");
+                if (System.IO.File.Exists(ico)) AppIcon = new Icon(ico);
+            }
+            catch { AppIcon = null; }
 
             tray = new NotifyIcon();
-            tray.Icon = SystemIcons.Application;
+            tray.Icon = AppIcon ?? SystemIcons.Application;
             tray.Visible = true;
             ContextMenuStrip menu = new ContextMenuStrip();
-            menu.Items.Add("Highlight on/off  (Ctrl+Alt+H)", null, delegate { Toggle(); });
-            menu.Items.Add("Settings...  (Ctrl+Alt+K)", null, delegate { ShowSettings(); });
+            toggleItem = (ToolStripMenuItem)menu.Items.Add("Highlight on/off", null, delegate { Toggle(); });
+            settingsItem = (ToolStripMenuItem)menu.Items.Add("Settings...", null, delegate { ShowSettings(); });
             menu.Items.Add("Exit", null, delegate { Exit(); });
             tray.ContextMenuStrip = menu;
             tray.DoubleClick += delegate { ShowSettings(); };
+            UpdateKeyLabels();
             UpdateTrayText();
 
-            if (!ok1 || !ok2)
-                MessageBox.Show("Another program is already using Ctrl+Alt+H or Ctrl+Alt+K, so that hotkey won't work.\n" +
-                                "You can still use the tray icon (bottom-right of the taskbar).", "Word Focus");
+            if (failed.Count > 0)
+                MessageBox.Show("Another program is already using these hotkeys, so they won't work:\n\n" +
+                                string.Join("\n", failed.ToArray()) +
+                                "\n\nYou can pick different keys in Settings > Advanced, or use the tray icon by the clock.", "Word Focus");
 
             Thread worker = new Thread(Loop);
             worker.IsBackground = true;
@@ -487,20 +808,94 @@ namespace WordFocus
         {
             if (id == 1) Toggle();
             else if (id == 2) ShowSettings();
+            else if (id == 3 || id == 4)
+            {
+                SetCount(count + (id == 3 ? 1 : -1));
+                if (settings != null) settings.SyncFromController();
+            }
         }
 
         public void Toggle()
         {
             enabled = !enabled;
             dirty = true;
+            settingsChanged = true;
             if (!enabled) { Clear(); RestoreCursor(); }
             UpdateTrayText();
             if (settings != null) settings.SyncFromController();
         }
 
-        public void SetCount(int v) { count = v; dirty = true; }
-        public void SetOmbre(bool v) { ombre = v; dirty = true; }
-        public void SetColor(Color c) { HighlightColor = Color.FromArgb(255, c.R, c.G, c.B); dirty = true; }
+        public void SetCount(int v) { count = Math.Max(1, Math.Min(LineModeValue, v)); dirty = true; settingsChanged = true; }
+        public void SetOmbre(bool v) { ombre = v; dirty = true; settingsChanged = true; }
+        public void SetStrength(int percent) { strengthPercent = Math.Max(10, Math.Min(100, percent)); dirty = true; settingsChanged = true; }
+        public int StrengthPercent { get { return strengthPercent; } }
+        public void SetColor(Color c) { HighlightColor = Color.FromArgb(255, c.R, c.G, c.B); dirty = true; settingsChanged = true; }
+
+        // ---- Remembered settings: %APPDATA%\WordFocus\settings.txt (plain text, one setting per line) ----
+        private volatile bool settingsChanged = false;
+
+        private static string SettingsPath()
+        {
+            return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WordFocus", "settings.txt");
+        }
+
+        private void LoadSettings()
+        {
+            try
+            {
+                string path = SettingsPath();
+                if (!System.IO.File.Exists(path)) return;
+                foreach (string line in System.IO.File.ReadAllLines(path))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string k = line.Substring(0, eq).Trim().ToLowerInvariant();
+                    string v = line.Substring(eq + 1).Trim();
+                    int n;
+                    if (k == "on") enabled = v == "1";
+                    else if (k == "words" && int.TryParse(v, out n)) count = Math.Max(1, Math.Min(LineModeValue, n));
+                    else if (k == "strength" && int.TryParse(v, out n)) strengthPercent = Math.Max(10, Math.Min(100, n));
+                    else if (k == "ombre") ombre = v == "1";
+                    else if (k == "style") underline = v == "underline";
+                    else if (k.StartsWith("key") && k.Length == 4 && k[3] >= '1' && k[3] <= '4')
+                    {
+                        string[] parts = v.Split(',');
+                        uint m, vk;
+                        if (parts.Length == 2 && uint.TryParse(parts[0], out m) && uint.TryParse(parts[1], out vk))
+                        { keyMods[k[3] - '1'] = m & 7; keyVk[k[3] - '1'] = vk; }
+                    }
+                    else if (k == "color" && v.Length == 6 && int.TryParse(v, System.Globalization.NumberStyles.HexNumber, null, out n))
+                        HighlightColor = Color.FromArgb(255, (n >> 16) & 255, (n >> 8) & 255, n & 255);
+                }
+            }
+            catch { } // a missing or damaged file just means defaults
+        }
+
+        private void SaveSettings()
+        {
+            try
+            {
+                string path = SettingsPath();
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path));
+                Color c = HighlightColor;
+                string[] lines = new string[] {
+                    "# Word Focus settings (saved automatically). Delete this file to go back to defaults.",
+                    "on=" + (enabled ? "1" : "0"),
+                    "words=" + count,
+                    "strength=" + strengthPercent,
+                    "ombre=" + (ombre ? "1" : "0"),
+                    "color=" + c.R.ToString("X2") + c.G.ToString("X2") + c.B.ToString("X2"),
+                    "style=" + (underline ? "underline" : "highlight"),
+                    "key1=" + keyMods[0] + "," + keyVk[0],
+                    "key2=" + keyMods[1] + "," + keyVk[1],
+                    "key3=" + keyMods[2] + "," + keyVk[2],
+                    "key4=" + keyMods[3] + "," + keyVk[3]
+                };
+                System.IO.File.WriteAllLines(path, lines);
+                settingsChanged = false;
+            }
+            catch { }
+        }
 
         private void UpdateTrayText() { tray.Text = "Word Focus - " + (enabled ? "ON" : "off"); }
 
@@ -515,9 +910,9 @@ namespace WordFocus
         private void Exit()
         {
             running = false;
+            if (settingsChanged) SaveSettings();
             RestoreCursor();
-            Native.UnregisterHotKey(hotkeys.Handle, 1);
-            Native.UnregisterHotKey(hotkeys.Handle, 2);
+            UnregisterAll();
             hotkeys.Dispose();
             tray.Visible = false;
             tray.Dispose();
@@ -705,6 +1100,7 @@ namespace WordFocus
 
         private int AlphaAt(int i, int n)
         {
+            int MaxAlpha = strengthPercent * 255 / 100;
             if (!ombre || n <= 1) return MaxAlpha;
             float t = (float)i / n; // 0 at first word, 1 at end of last word
             return (int)(MaxAlpha * (1f - (1f - FadeTo) * t));
@@ -755,6 +1151,11 @@ namespace WordFocus
                         RectangleF rf = new RectangleF((float)(rc.Left - x0) - 1, (float)(rc.Top - y0),
                                                        (float)rc.Width + 2, (float)rc.Height);
                         if (rf.Width < 1 || rf.Height < 1) continue;
+                        if (underline)
+                        {
+                            float thick = Math.Max(2f, rf.Height * 0.12f);
+                            rf = new RectangleF(rf.X, rf.Bottom - thick, rf.Width, thick);
+                        }
                         RectangleF brushRect = new RectangleF(rf.X - 1, rf.Y, rf.Width + 2, rf.Height);
                         using (LinearGradientBrush br = new LinearGradientBrush(brushRect,
                                    Color.FromArgb(a0, HighlightColor), Color.FromArgb(a1, HighlightColor),
@@ -798,15 +1199,63 @@ namespace WordFocus
         }
     }
 
+    // ---- "Start with Windows": a shortcut in the user's Startup folder (no admin, no registry) ----
+    public static class Startup
+    {
+        public static string Folder; // where WordFocus.ps1 and Start Word Focus.cmd live
+
+        private static string LinkPath()
+        {
+            return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "Word Focus.lnk");
+        }
+
+        public static bool IsEnabled() { return System.IO.File.Exists(LinkPath()); }
+
+        // Returns null on success, or an error message.
+        public static string Set(bool on)
+        {
+            try
+            {
+                string link = LinkPath();
+                if (!on) { if (System.IO.File.Exists(link)) System.IO.File.Delete(link); return null; }
+                string target = System.IO.Path.Combine(Folder, "Start Word Focus.cmd");
+                if (!System.IO.File.Exists(target)) return "Can't find " + target;
+                Type t = Type.GetTypeFromProgID("WScript.Shell");
+                object shell = Activator.CreateInstance(t);
+                object sc = t.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { link });
+                Type st = sc.GetType();
+                st.InvokeMember("TargetPath", System.Reflection.BindingFlags.SetProperty, null, sc, new object[] { target });
+                st.InvokeMember("WorkingDirectory", System.Reflection.BindingFlags.SetProperty, null, sc, new object[] { Folder });
+                st.InvokeMember("WindowStyle", System.Reflection.BindingFlags.SetProperty, null, sc, new object[] { 7 }); // minimized
+                st.InvokeMember("Description", System.Reflection.BindingFlags.SetProperty, null, sc, new object[] { "Word Focus reading highlighter" });
+                st.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, sc, null);
+                Marshal.FinalReleaseComObject(sc);
+                Marshal.FinalReleaseComObject(shell);
+                return null;
+            }
+            catch (Exception ex) { return ex.Message; }
+        }
+    }
+
     public static class App
     {
         public static void Run(string folder)
         {
+            // Only one copy at a time (e.g. if it already started with Windows and you double-click it again).
+            bool firstCopy;
+            Mutex single = new Mutex(true, "WordFocus_SingleInstance_2sage4thyme", out firstCopy);
+            if (!firstCopy)
+            {
+                MessageBox.Show("Word Focus is already running. Look for its icon in the system tray, by the clock.\nCtrl+Alt+H turns the highlight on or off.", "Word Focus");
+                return;
+            }
+            Startup.Folder = folder;
             Log.Start(folder);
             Native.SetProcessDPIAware(); // so word positions match the screen exactly
             Application.EnableVisualStyles();
             new Controller();
             Application.Run();
+            GC.KeepAlive(single); // holds the one-copy lock until exit
         }
     }
 }

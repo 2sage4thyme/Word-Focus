@@ -6,9 +6,13 @@ Press a hotkey, move your mouse over text, and the word you're pointing at light
 
 - Works across your desktop, not just in a browser: Claude, Chrome, Edge, Word, Notepad, PDFs opened in a browser, web textbook readers, and more
 - Choose how many words to highlight: 1 to 10, or the rest of the line
+- Highlight or underline style
 - Ombre fade or one solid color
+- Adjustable highlight strength, from faint to solid
 - Six preset colors plus a custom color picker
 - Turn it on and off with **Ctrl+Alt+H**
+- Choose your own hotkeys, including optional keys to change the word count on the fly
+- Optional **Start with Windows** box, so it's always ready
 - Nothing to install: it runs with PowerShell, which is built into Windows
 
 ## Download and run
@@ -20,6 +24,8 @@ Press a hotkey, move your mouse over text, and the word you're pointing at light
 4. A small icon appears in the system tray (bottom-right of the taskbar; you may need to click the **^** arrow).
 5. Press **Ctrl+Alt+H** and hover over some text.
 
+Word Focus keeps running in the tray until you exit or restart. To have it start automatically, press **Ctrl+Alt+K** and tick **Start with Windows**. It comes back with your last settings, including whether the highlight was on.
+
 To quit, right-click the tray icon and choose **Exit**.
 
 ## Controls
@@ -27,10 +33,12 @@ To quit, right-click the tray icon and choose **Exit**.
 | Key | What it does |
 |---|---|
 | Ctrl+Alt+H | Turn the highlight on or off |
-| Ctrl+Alt+K | Open settings (word count, ombre on/off, color) |
+| Ctrl+Alt+K | Open settings (word count, highlight strength, ombre on/off, color, start with Windows) |
 | Tray icon, right-click | On/off, settings, exit |
 
-Settings reset to the defaults each time you start it (3 words, ombre on, yellow). To change the defaults, open `WordFocus.ps1` in Notepad and edit the values marked "Easy-to-change defaults".
+To change the style (highlight or underline), pick your own hotkeys, or add keys that highlight one more or one fewer word, open settings and click **Advanced...**. The word-count keys are off until you set them. If another program already uses one of the hotkeys, Word Focus tells you when it starts, and you can choose a different one there.
+
+Your settings, including whether the highlight was on, are remembered between sessions and restarts. They're saved in `%APPDATA%\WordFocus\settings.txt`. To go back to the defaults (3 words, 60% strength, ombre on, yellow), exit Word Focus and delete that file.
 
 ## Where it works, and where it doesn't
 
@@ -41,8 +49,9 @@ Word Focus asks Windows' accessibility system (UI Automation, the same one scree
 
 ## What it does to your computer
 
-- It doesn't install anything, start with Windows, or change saved settings.
-- It never connects to the internet and writes no files.
+- It doesn't install anything or change saved settings.
+- It only starts with Windows if you tick **Start with Windows**. That adds a shortcut named "Word Focus" to your personal Startup folder, and unticking removes it. If you move the Word Focus folder later, untick and re-tick the box so the shortcut points to the new location.
+- It never connects to the internet. The only files it writes are your settings file (`%APPDATA%\WordFocus\settings.txt`) and that optional shortcut.
 - While a highlight is showing, it swaps your arrow, text, and link pointers for see-through copies, kept in memory only. It puts your normal pointers back when you stop hovering, turn it off, or exit.
   - If Word Focus is force-closed (for example from Task Manager) while the pointer is faded, start it and exit it once, or sign out and back in, to get your normal pointer back.
 - `Start Word Focus.cmd` runs PowerShell with `-ExecutionPolicy Bypass`, which lets this one script run without changing your computer's script settings.
