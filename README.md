@@ -12,7 +12,7 @@ Press a hotkey, move your mouse over text, and the word you're pointing at light
 - Six preset colors plus a custom color picker
 - Turn it on and off with **Ctrl+Alt+H**
 - **Paragraph Focus** and **Page Focus**: point at text and press a hotkey to softly light up the whole paragraph, or all the body text visible in the window (skipping headings, buttons, and side menus, and following along as you scroll), while the hover highlight keeps working on top
-- Choose your own hotkeys, including optional keys to change the word count on the fly
+- A hotkey for anything Word Focus can do (word count, style, colors, strength, pointer, Focus layers, and more), all optional and all changeable
 - Optional **Start with Windows** box, so it's always ready
 - Nothing to install: it runs with PowerShell, which is built into Windows
 
@@ -36,9 +36,10 @@ To quit, right-click the tray icon and choose **Exit**.
 | Ctrl+Alt+H | Turn the highlight on or off |
 | Ctrl+Alt+K | Open settings (word count, ombre, overlap lines, highlight strength, pointer visibility, color, start with Windows) |
 | Ctrl+Alt+A | Paragraph Focus: light up the paragraph under the mouse (press again to turn off) |
+| Ctrl+Alt+B | Page Focus: light up the body text visible in the window (press again to turn off) |
 | Tray icon, right-click | On/off, settings, exit |
 
-To change the style (highlight, underline, or both), pick your own hotkeys, or add keys that highlight one more or one fewer word, open settings and click **Advanced...**. The word-count keys and Page Focus are off until you give them a hotkey there. Advanced also has the style (highlight, underline, or both) and strength for the Paragraph and Page Focus layer, which starts at 10%. If another program already uses one of the hotkeys, Word Focus tells you when it starts, and you can choose a different one there.
+To change the style (highlight, underline, or both) or the Paragraph / Page Focus layer, open settings and click **Advanced...**. To set hotkeys, click **Hotkeys...** in Advanced: every action is listed, and anything without a hotkey shows "none" until you give it one. If another program already uses one of your hotkeys, Word Focus tells you when it starts.
 
 Your settings, including whether the highlight was on, are remembered between sessions and restarts. They're saved in `%APPDATA%\WordFocus\settings.txt`. To go back to the defaults (3 words, ombre on, overlap lines on, 60% strength, pointer 10% visible, yellow), exit Word Focus and delete that file.
 
