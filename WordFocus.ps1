@@ -2,7 +2,8 @@
 # Required Notice: Copyright 2sage4thyme (https://github.com/2sage4thyme)
 # License: Big Time Public License 2.0.2 - https://bigtimelicense.com/versions/2.0.2 (see LICENSE.md)
 #   Ctrl+Alt+H  = turn highlight on/off
-#   Ctrl+Alt+K  = open settings (word count, highlight strength, ombre on/off, color)
+#   Ctrl+Alt+K  = open settings (word count, ombre, strength, pointer, color, and more)
+#   Ctrl+Alt+A  = Paragraph Focus (point at text; press again to turn off)
 #   Hotkeys can be changed, and optional more/fewer-words keys added, in Settings > Advanced.
 #   Tray icon (bottom-right) -> Exit to quit.
 # What this script does: compiles the C# code below in memory (using Windows' built-in
@@ -53,6 +54,13 @@ namespace WordFocus
         public struct BLENDFUNCTION { public byte BlendOp; public byte BlendFlags; public byte SourceConstantAlpha; public byte AlphaFormat; }
 
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+        [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+        [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+        [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+        [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
         [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
         [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
@@ -98,15 +106,29 @@ namespace WordFocus
         private bool faded = false;
         public bool IsFaded { get { return faded; } }
 
+        private float opacity;
+        public float Opacity { get { return opacity; } }
+
+        // Changes how see-through the pointer is; re-applies immediately if currently faded.
+        public void SetOpacity(float o)
+        {
+            opacity = Math.Max(0f, Math.Min(1f, o));
+            if (!faded) return;
+            if (opacity >= 0.999f) { RestoreAlways(); return; }
+            faded = false;
+            Fade();
+        }
+
         public CursorFader(float opacity)
         {
+            this.opacity = opacity;
             RestoreAlways(); // in case an earlier run was force-closed while faded
             foreach (int id in Ids)
             {
                 try
                 {
                     IntPtr h = Native.LoadCursor(IntPtr.Zero, new IntPtr(id));
-                    CurData d = Capture(h, opacity);
+                    CurData d = Capture(h);
                     if (d != null)
                     {
                         d.Id = id; data.Add(d);
@@ -121,10 +143,10 @@ namespace WordFocus
 
         public void Fade()
         {
-            if (faded || data.Count == 0) return;
+            if (faded || data.Count == 0 || opacity >= 0.999f) return; // 100% = leave the normal pointer alone
             foreach (CurData d in data)
             {
-                IntPtr c = Create(d);
+                IntPtr c = Create(d, opacity);
                 bool ok = c != IntPtr.Zero && Native.SetSystemCursor(c, d.Id); // Windows takes ownership of c
                 Log.Write("Fade cursor " + d.Id + " created=" + (c != IntPtr.Zero) + " set=" + ok + (ok ? "" : " err=" + Marshal.GetLastWin32Error()));
             }
@@ -160,7 +182,7 @@ namespace WordFocus
             }
         }
 
-        private static CurData Capture(IntPtr cur, float opacity)
+        private static CurData Capture(IntPtr cur)
         {
             Native.ICONINFO ii;
             if (cur == IntPtr.Zero || !Native.GetIconInfo(cur, out ii)) return null;
@@ -198,20 +220,13 @@ namespace WordFocus
                     bool near = (x > 0 && inv[i - 1]) || (x < w - 1 && inv[i + 1]) || (y > 0 && inv[i - w]) || (y < h - 1 && inv[i + w]);
                     if (near) outp[i] = unchecked((int)0xFFFFFFFF);
                 }
-            // Apply the see-through amount.
-            for (int i = 0; i < n; i++)
-            {
-                int a = (outp[i] >> 24) & 255;
-                int a2 = (int)(a * opacity);
-                outp[i] = (a2 << 24) | (outp[i] & 0xFFFFFF);
-            }
 
             CurData d = new CurData();
             d.W = w; d.H = h; d.HotX = ii.xHotspot; d.HotY = ii.yHotspot; d.Pixels = outp;
             return d;
         }
 
-        private static IntPtr Create(CurData d)
+        private static IntPtr Create(CurData d, float opacity)
         {
             Native.BITMAPINFOHEADER bih = new Native.BITMAPINFOHEADER();
             bih.biSize = Marshal.SizeOf(typeof(Native.BITMAPINFOHEADER));
@@ -219,8 +234,17 @@ namespace WordFocus
             IntPtr bits;
             IntPtr color = Native.CreateDIBSection(IntPtr.Zero, ref bih, 0, out bits, IntPtr.Zero, 0);
             if (color == IntPtr.Zero) return IntPtr.Zero;
-            Marshal.Copy(d.Pixels, 0, bits, d.Pixels.Length);
-            byte[] maskBits = new byte[((d.W + 15) / 16 * 2) * d.H]; // all zero
+            int[] px = new int[d.Pixels.Length];
+            for (int i = 0; i < px.Length; i++) // apply the see-through amount
+            {
+                int a = (int)(((d.Pixels[i] >> 24) & 255) * opacity);
+                px[i] = (a << 24) | (d.Pixels[i] & 0xFFFFFF);
+            }
+            Marshal.Copy(px, 0, bits, px.Length);
+            // Mask of all 1s: if every pixel is fully see-through (0%), Windows falls back to this mask,
+            // and all 1s means "leave the screen as is", i.e. an invisible pointer (an all-0 mask showed a black box).
+            byte[] maskBits = new byte[((d.W + 15) / 16 * 2) * d.H];
+            for (int i = 0; i < maskBits.Length; i++) maskBits[i] = 0xFF;
             IntPtr mask = Native.CreateBitmap(d.W, d.H, 1, 1, maskBits);
             Native.ICONINFO ni = new Native.ICONINFO();
             ni.fIcon = false; ni.xHotspot = d.HotX; ni.yHotspot = d.HotY; ni.hbmMask = mask; ni.hbmColor = color;
@@ -255,6 +279,14 @@ namespace WordFocus
 
         protected override bool ShowWithoutActivation { get { return true; } }
 
+        // Other "always on top" windows (e.g. an app in a special on-top mode) can end up above us.
+        // Re-claim the top spot each time we draw, without taking focus.
+        public void BringToTop()
+        {
+            // HWND_TOPMOST = -1; NOSIZE | NOMOVE | NOACTIVATE | NOOWNERZORDER
+            Native.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200);
+        }
+
         public void SetBitmap(Bitmap bmp, int x, int y)
         {
             IntPtr screenDc = Native.GetDC(IntPtr.Zero);
@@ -270,6 +302,7 @@ namespace WordFocus
                 Native.BLENDFUNCTION blend = new Native.BLENDFUNCTION();
                 blend.BlendOp = 0; blend.BlendFlags = 0; blend.SourceConstantAlpha = 255; blend.AlphaFormat = 1;
                 Native.UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2);
+                BringToTop();
             }
             finally
             {
@@ -287,10 +320,32 @@ namespace WordFocus
         private readonly TrackBar slider;
         private readonly Label sliderLabel;
         private readonly CheckBox ombreBox;
+        private readonly CheckBox overlapBox;
         private readonly CheckBox onBox;
         private readonly CheckBox startupBox;
         private readonly TrackBar strength;
         private readonly Label strengthLabel;
+        private readonly TrackBar pointer;
+        private readonly Label pointerLabel;
+
+        private const int W = 380;   // window width
+        private const int CW = 350;  // control width
+
+        private static TrackBar MakeSlider(int min, int max, int tick, int small, int large, int y)
+        {
+            TrackBar t = new TrackBar();
+            t.Minimum = min; t.Maximum = max; t.TickFrequency = tick; t.SmallChange = small; t.LargeChange = large;
+            t.SetBounds(10, y, CW + 6, 45);
+            return t;
+        }
+
+        private Label MakeLabel(int y)
+        {
+            Label l = new Label();
+            l.SetBounds(14, y, CW, 20);
+            Controls.Add(l);
+            return l;
+        }
 
         public SettingsForm(Controller c)
         {
@@ -298,49 +353,48 @@ namespace WordFocus
             Text = "Word Focus";
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(320, 300);
+            ClientSize = new Size(W, 412);
             TopMost = true;
 
             onBox = new CheckBox();
-            onBox.Text = "Highlight on   (Ctrl+Alt+H)";
-            onBox.SetBounds(14, 10, 290, 24);
+            onBox.SetBounds(14, 10, CW, 24);
             onBox.CheckedChanged += delegate { if (onBox.Checked != ctl.Enabled) ctl.Toggle(); };
+            Controls.Add(onBox);
 
-            sliderLabel = new Label();
-            sliderLabel.SetBounds(14, 40, 290, 20);
-
-            slider = new TrackBar();
-            slider.Minimum = 1; slider.Maximum = 11; slider.TickFrequency = 1; slider.LargeChange = 1;
-            slider.SetBounds(10, 60, 300, 45);
+            // Words: 1-10, then end of sentence, end of line, end of line + next word.
+            sliderLabel = MakeLabel(134);
+            slider = MakeSlider(1, Controller.MaxCountValue, 1, 1, 1, 152);
             slider.ValueChanged += delegate { ctl.SetCount(slider.Value); UpdateLabel(); };
+            Controls.Add(slider);
 
             ombreBox = new CheckBox();
             ombreBox.Text = "Ombre fade   (off = one solid color)";
-            ombreBox.SetBounds(14, 110, 290, 24);
+            ombreBox.SetBounds(14, 78, CW, 24);
             ombreBox.CheckedChanged += delegate { ctl.SetOmbre(ombreBox.Checked); };
+            Controls.Add(ombreBox);
 
-            Label hint = new Label();
-            hint.Text = "Closing this window keeps Word Focus running.";
-            hint.ForeColor = SystemColors.GrayText;
-            hint.SetBounds(14, 274, 210, 20);
+            overlapBox = new CheckBox();
+            overlapBox.Text = "Overlap lines   (thin darker lines where words meet)";
+            overlapBox.SetBounds(14, 102, CW, 24);
+            overlapBox.CheckedChanged += delegate { ctl.SetOverlapLines(overlapBox.Checked); };
+            Controls.Add(overlapBox);
 
-            Controls.Add(onBox); Controls.Add(sliderLabel); Controls.Add(slider);
-            Controls.Add(ombreBox); Controls.Add(hint);
+            // Highlight strength: 10% = faint, 100% = solid.
+            strengthLabel = MakeLabel(198);
+            strength = MakeSlider(1, 10, 1, 1, 1, 216); // tens: 10%..100%
+            strength.ValueChanged += delegate { ctl.SetStrength(strength.Value * 10); UpdateStrengthLabel(); };
+            Controls.Add(strength);
 
-            // Highlight strength: how see-through the highlight is (10% = faint, 100% = solid).
-            strengthLabel = new Label();
-            strengthLabel.SetBounds(14, 138, 290, 20);
-            strength = new TrackBar();
-            strength.Minimum = 10; strength.Maximum = 100; strength.TickFrequency = 10;
-            strength.SmallChange = 5; strength.LargeChange = 10;
-            strength.SetBounds(10, 156, 300, 45);
-            strength.ValueChanged += delegate { ctl.SetStrength(strength.Value); UpdateStrengthLabel(); };
-            Controls.Add(strengthLabel); Controls.Add(strength);
+            // Pointer visibility while highlighting: 0% = invisible, 100% = normal.
+            pointerLabel = MakeLabel(262);
+            pointer = MakeSlider(0, 10, 1, 1, 1, 280); // tens: 0%..100%
+            pointer.ValueChanged += delegate { ctl.SetCursorPercent(pointer.Value * 10); UpdatePointerLabel(); };
+            Controls.Add(pointer);
 
             // Color row: preset swatches + a "Custom..." button that opens the Windows color picker.
             Label colorLabel = new Label();
             colorLabel.Text = "Color:";
-            colorLabel.SetBounds(14, 206, 42, 20);
+            colorLabel.SetBounds(14, 46, 42, 20);
             Controls.Add(colorLabel);
             Color[] presets = new Color[] {
                 Color.FromArgb(255, 214, 0),   // yellow
@@ -357,7 +411,7 @@ namespace WordFocus
                 Button sw = new Button();
                 sw.FlatStyle = FlatStyle.Flat;
                 sw.BackColor = presets[i];
-                sw.SetBounds(58 + i * 28, 202, 24, 24);
+                sw.SetBounds(60 + i * 30, 42, 26, 26);
                 Color picked = presets[i];
                 sw.Click += delegate { ctl.SetColor(picked); };
                 tips.SetToolTip(sw, names[i]);
@@ -365,7 +419,7 @@ namespace WordFocus
             }
             Button custom = new Button();
             custom.Text = "Custom...";
-            custom.SetBounds(228, 201, 80, 26);
+            custom.SetBounds(W - 104, 41, 90, 28);
             custom.Click += delegate
             {
                 using (ColorDialog dlg = new ColorDialog())
@@ -380,7 +434,7 @@ namespace WordFocus
             // Start with Windows: adds/removes a shortcut in your personal Startup folder.
             startupBox = new CheckBox();
             startupBox.Text = "Start with Windows   (uses your last settings)";
-            startupBox.SetBounds(14, 240, 300, 24);
+            startupBox.SetBounds(14, 332, CW, 24);
             startupBox.Checked = Startup.IsEnabled();
             startupBox.CheckedChanged += delegate
             {
@@ -393,11 +447,18 @@ namespace WordFocus
             };
             Controls.Add(startupBox);
 
+            Label hint = new Label();
+            hint.Text = "Closing this window keeps Word Focus running.";
+            hint.ForeColor = SystemColors.GrayText;
+            hint.SetBounds(14, 378, W - 130, 20);
+            Controls.Add(hint);
+
             Button adv = new Button();
             adv.Text = "Advanced...";
-            adv.SetBounds(228, 268, 80, 26);
+            adv.SetBounds(W - 104, 372, 90, 28);
             adv.Click += delegate { ctl.ShowAdvanced(); };
             Controls.Add(adv);
+
             if (Controller.AppIcon != null) Icon = Controller.AppIcon;
             SyncFromController();
         }
@@ -408,22 +469,24 @@ namespace WordFocus
             onBox.Text = "Highlight on   (" + ctl.KeyText(0) + ")";
             slider.Value = ctl.Count;
             ombreBox.Checked = ctl.Ombre;
-            if (strength != null) { strength.Value = ctl.StrengthPercent; UpdateStrengthLabel(); }
+            overlapBox.Checked = ctl.OverlapLines;
+            strength.Value = Math.Max(1, Math.Min(10, (ctl.StrengthPercent + 5) / 10));
+            pointer.Value = Math.Max(0, Math.Min(10, (ctl.CursorPercent + 5) / 10));
+            UpdateStrengthLabel();
+            UpdatePointerLabel();
             UpdateLabel();
         }
 
-        private void UpdateStrengthLabel()
+        private void UpdateStrengthLabel() { strengthLabel.Text = "Highlight strength: " + (strength.Value * 10) + "%"; }
+
+        private void UpdatePointerLabel()
         {
-            strengthLabel.Text = "Highlight strength: " + strength.Value + "%";
+            int v = pointer.Value * 10;
+            pointerLabel.Text = "Mouse pointer while over text: " + v + "% visible" +
+                (v == 0 ? " (invisible)" : v == 100 ? " (normal)" : "");
         }
 
-        private void UpdateLabel()
-        {
-            int v = slider.Value;
-            if (v >= 11) sliderLabel.Text = "Words highlighted: rest of the line";
-            else if (v == 1) sliderLabel.Text = "Words highlighted: 1 (just the hovered word)";
-            else sliderLabel.Text = "Words highlighted: " + v + " (hovered word + next " + (v - 1) + ")";
-        }
+        private void UpdateLabel() { sliderLabel.Text = "Words highlighted: " + Controller.CountText(slider.Value); }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
@@ -502,10 +565,38 @@ namespace WordFocus
     public class AdvancedForm : Form
     {
         private readonly Controller ctl;
-        private readonly RadioButton hlRadio, ulRadio;
-        private readonly HotkeyBox[] boxes = new HotkeyBox[4];
+        private readonly RadioButton hlRadio, ulRadio, bothRadio;
+        private readonly RadioButton fHlRadio, fUlRadio, fBothRadio;
+        private readonly TrackBar fStrength;
+        private readonly Label fStrengthLabel;
+        private readonly HotkeyBox[] boxes;
         private readonly Label status;
         private readonly Button resetBtn;
+
+        private const int W = 360;
+
+        private Label Heading(string text, int y)
+        {
+            Label l = new Label();
+            l.Text = text;
+            l.Font = new Font(Font, FontStyle.Bold);
+            l.SetBounds(14, y, W - 28, 20);
+            Controls.Add(l);
+            return l;
+        }
+
+        // Three radio buttons in their own panel, so each group works independently.
+        private Panel StyleRow(int y, out RadioButton a, out RadioButton b, out RadioButton c)
+        {
+            Panel p = new Panel();
+            p.SetBounds(14, y, W - 28, 26);
+            a = new RadioButton(); a.Text = "Highlight"; a.SetBounds(6, 0, 90, 24);
+            b = new RadioButton(); b.Text = "Underline"; b.SetBounds(101, 0, 90, 24);
+            c = new RadioButton(); c.Text = "Both"; c.SetBounds(196, 0, 70, 24);
+            p.Controls.Add(a); p.Controls.Add(b); p.Controls.Add(c);
+            Controls.Add(p);
+            return p;
+        }
 
         public AdvancedForm(Controller c)
         {
@@ -513,70 +604,95 @@ namespace WordFocus
             Text = "Word Focus - Advanced";
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(340, 290);
             TopMost = true;
             if (Controller.AppIcon != null) Icon = Controller.AppIcon;
+            ToolTip tips = new ToolTip();
 
-            Label styleLabel = new Label();
-            styleLabel.Text = "Style";
-            styleLabel.Font = new Font(Font, FontStyle.Bold);
-            styleLabel.SetBounds(14, 10, 300, 20);
-            Controls.Add(styleLabel);
+            // --- Hover style ---
+            Heading("Hover style", 10);
+            StyleRow(32, out hlRadio, out ulRadio, out bothRadio);
+            hlRadio.CheckedChanged += delegate { if (hlRadio.Checked) ctl.SetStyle(Controller.StyleHighlight); };
+            ulRadio.CheckedChanged += delegate { if (ulRadio.Checked) ctl.SetStyle(Controller.StyleUnderline); };
+            bothRadio.CheckedChanged += delegate { if (bothRadio.Checked) ctl.SetStyle(Controller.StyleBoth); };
+            tips.SetToolTip(bothRadio, "Highlight in your color, plus an underline that is automatically white on dark pages and black on light pages.");
 
-            hlRadio = new RadioButton(); hlRadio.Text = "Highlight"; hlRadio.SetBounds(20, 32, 110, 24);
-            ulRadio = new RadioButton(); ulRadio.Text = "Underline"; ulRadio.SetBounds(140, 32, 110, 24);
-            hlRadio.CheckedChanged += delegate { if (hlRadio.Checked) ctl.SetUnderline(false); };
-            ulRadio.CheckedChanged += delegate { if (ulRadio.Checked) ctl.SetUnderline(true); };
-            Controls.Add(hlRadio); Controls.Add(ulRadio);
+            // --- Paragraph & Page Focus ---
+            Heading("Paragraph && Page Focus", 68);
+            Label fHint = new Label();
+            fHint.Text = "Point at text and press the hotkey to light up the whole paragraph (or visible page). Press it again to turn it off.";
+            fHint.ForeColor = SystemColors.GrayText;
+            fHint.SetBounds(14, 90, W - 28, 32);
+            Controls.Add(fHint);
+            StyleRow(124, out fHlRadio, out fUlRadio, out fBothRadio);
+            fHlRadio.CheckedChanged += delegate { if (fHlRadio.Checked) ctl.SetFocusStyle(Controller.StyleHighlight); };
+            fUlRadio.CheckedChanged += delegate { if (fUlRadio.Checked) ctl.SetFocusStyle(Controller.StyleUnderline); };
+            fBothRadio.CheckedChanged += delegate { if (fBothRadio.Checked) ctl.SetFocusStyle(Controller.StyleBoth); };
+            fStrengthLabel = new Label();
+            fStrengthLabel.SetBounds(14, 154, W - 28, 20);
+            Controls.Add(fStrengthLabel);
+            fStrength = new TrackBar();
+            fStrength.Minimum = 1; fStrength.Maximum = 10; fStrength.TickFrequency = 1;
+            fStrength.SmallChange = 1; fStrength.LargeChange = 1;
+            fStrength.SetBounds(10, 172, W - 20, 45);
+            fStrength.ValueChanged += delegate { ctl.SetFocusStrength(fStrength.Value * 10); UpdateFocusLabel(); };
+            Controls.Add(fStrength);
 
-            Label keysLabel = new Label();
-            keysLabel.Text = "Hotkeys   (click a box, then press the new keys)";
-            keysLabel.Font = new Font(Font, FontStyle.Bold);
-            keysLabel.SetBounds(14, 68, 320, 20);
-            Controls.Add(keysLabel);
-
+            // --- Hotkeys ---
+            Heading("Hotkeys   (click a box, then press the new keys)", 222);
+            int n = ctl.KeyCount;
+            boxes = new HotkeyBox[n];
+            int rowY = 250;
             status = new Label();
             status.ForeColor = SystemColors.GrayText;
-            status.SetBounds(14, 222, 320, 32);
-
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < n; i++)
             {
                 Label l = new Label();
                 l.Text = Controller.KeyNames[i];
-                l.SetBounds(20, 96 + i * 30, 120, 20);
+                l.SetBounds(20, rowY + 3 + i * 30, 130, 20);
                 Controls.Add(l);
                 boxes[i] = new HotkeyBox(ctl, i, status);
-                boxes[i].SetBounds(150, 93 + i * 30, 170, 22);
+                boxes[i].SetBounds(160, rowY + i * 30, W - 174, 22);
                 Controls.Add(boxes[i]);
             }
+            int afterRows = rowY + n * 30 + 4;
+            status.SetBounds(14, afterRows, W - 28, 32);
             Controls.Add(status);
 
             resetBtn = new Button();
             resetBtn.Text = "Reset hotkeys to defaults";
-            resetBtn.SetBounds(14, 256, 170, 26);
+            resetBtn.SetBounds(14, afterRows + 36, 180, 28);
             resetBtn.Click += delegate
             {
                 ctl.ResetHotkeys();
                 SyncFromController();
                 status.ForeColor = SystemColors.GrayText;
-                status.Text = "Hotkeys reset: Ctrl+Alt+H, Ctrl+Alt+K, word-count keys off.";
+                status.Text = "Hotkeys reset to defaults.";
             };
             Controls.Add(resetBtn);
+            ClientSize = new Size(W, afterRows + 74);
 
             // Make sure our hotkeys come back if this window loses focus while a box is recording.
             Deactivate += delegate { ActiveControl = resetBtn; ctl.ResumeHotkeys(); };
         }
 
+        private void UpdateFocusLabel() { fStrengthLabel.Text = "Focus area strength: " + (fStrength.Value * 10) + "%"; }
+
         public void ReleaseFocus() { ActiveControl = resetBtn; }
 
         public void SyncFromController()
         {
-            hlRadio.Checked = !ctl.Underline;
-            ulRadio.Checked = ctl.Underline;
-            for (int i = 0; i < 4; i++) boxes[i].ShowCurrent();
+            hlRadio.Checked = ctl.Style == Controller.StyleHighlight;
+            ulRadio.Checked = ctl.Style == Controller.StyleUnderline;
+            bothRadio.Checked = ctl.Style == Controller.StyleBoth;
+            fHlRadio.Checked = ctl.FocusStyle == Controller.StyleHighlight;
+            fUlRadio.Checked = ctl.FocusStyle == Controller.StyleUnderline;
+            fBothRadio.Checked = ctl.FocusStyle == Controller.StyleBoth;
+            fStrength.Value = Math.Max(1, Math.Min(10, (ctl.FocusStrength + 5) / 10));
+            UpdateFocusLabel();
+            for (int i = 0; i < boxes.Length; i++) boxes[i].ShowCurrent();
             ActiveControl = resetBtn;
             status.ForeColor = SystemColors.GrayText;
-            status.Text = "Word-count keys are off until you set them (for example Ctrl+Alt+Up / Down).";
+            status.Text = "Keys showing \"none\" are off until you set them.";
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -612,8 +728,12 @@ namespace WordFocus
         public static Color HighlightColor = Color.FromArgb(255, 214, 0); // yellow
         public const int DefaultStrengthPercent = 60; // highlight strength at start-up (10-100)
         public const float FadeTo = 0.15f;   // last word fades to this fraction of the first word's strength
-        public const int LineModeValue = 11; // slider value that means "rest of the line"
-        public const float CursorOpacity = 0.10f; // pointer see-through amount while highlighting (0 = invisible, 1 = normal)
+        // Slider positions after 1-10 words:
+        public const int SentenceValue = 11;  // to the end of the sentence
+        public const int LineValue = 12;      // to the end of the line
+        public const int LinePlusValue = 13;  // end of the line + first word of the next line
+        public const int MaxCountValue = 13;
+        public const int DefaultCursorPercent = 10; // pointer visibility while highlighting (0 = invisible, 100 = normal)
         public const int CursorRestoreDelayMs = 700; // keeps the pointer faded while moving across gaps between words
         // ====================================
 
@@ -636,20 +756,56 @@ namespace WordFocus
         public bool Ombre { get { return ombre; } }
 
         // ---- Style ----
-        private volatile bool underline = false;
-        public bool Underline { get { return underline; } }
-        public void SetUnderline(bool v) { underline = v; dirty = true; settingsChanged = true; }
+        // 0 = highlight, 1 = underline (in your color), 2 = both (highlight in your color + automatic black/white underline)
+        public const int StyleHighlight = 0, StyleUnderline = 1, StyleBoth = 2;
+        private volatile int style = StyleHighlight;
+        public int Style { get { return style; } }
+        public void SetStyle(int v) { style = Math.Max(0, Math.Min(2, v)); dirty = true; settingsChanged = true; }
+
+        // ---- Paragraph / Page Focus: a steady layer over a whole paragraph or the visible page ----
+        public const int FocusNone = 0, FocusParagraph = 1, FocusPage = 2, FocusClear = 3;
+        private volatile int focusStyle = StyleHighlight;
+        private volatile int focusStrength = 10;
+        public int FocusStyle { get { return focusStyle; } }
+        public int FocusStrength { get { return focusStrength; } }
+        public void SetFocusStyle(int v) { focusStyle = Math.Max(0, Math.Min(2, v)); focusDirty = true; settingsChanged = true; }
+        public void SetFocusStrength(int v) { focusStrength = Math.Max(10, Math.Min(100, v)); focusDirty = true; settingsChanged = true; }
+
+        private static readonly uint MyPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+        private Overlay focusOverlay;
+        private volatile int focusRequest = FocusNone;    // set by hotkeys (UI thread), handled by the worker
+        private Native.POINT focusRequestPt;
+        private volatile int focusKind = FocusNone;       // what is showing now
+        private volatile bool focusDirty = false;         // redraw even if the text hasn't moved
+        // Worker-thread-only:
+        private List<TextPatternRange> focusRanges; // one range for a paragraph; one per run of body lines for a page
+        private IntPtr focusRoot = IntPtr.Zero;
+        private string focusSig = "";
+        private int focusRefreshTick = 0;
+        private int focusSlowPenalty = 0;
+        private string lastPagePos = "";
+
+        // Same hotkey again (or the other focus hotkey on the same kind) turns it off; otherwise start/switch.
+        private void RequestFocus(int kind)
+        {
+            Native.POINT p;
+            Native.GetCursorPos(out p);
+            focusRequestPt = p;
+            focusRequest = (focusKind == kind) ? FocusClear : kind;
+        }
 
         // ---- Custom icon: WordFocus.ico beside the script, if present ----
         public static Icon AppIcon;
 
         // ---- Hotkeys (index 0..3 -> hotkey id 1..4) ----
-        public static readonly string[] KeyNames = new string[] { "Highlight on/off", "Open settings", "More words", "Fewer words" };
+        public static readonly string[] KeyNames = new string[] { "Highlight on/off", "Open settings", "More words", "Fewer words", "Paragraph Focus", "Page Focus" };
         // Defaults: Ctrl+Alt+H and Ctrl+Alt+K. Word-count keys are off until set in Settings > Advanced.
-        private static readonly uint[] DefMods = new uint[] { 3, 3, 0, 0 };
-        private static readonly uint[] DefVk = new uint[] { 0x48, 0x4B, 0, 0 };
-        private readonly uint[] keyMods = new uint[] { 3, 3, 0, 0 };
-        private readonly uint[] keyVk = new uint[] { 0x48, 0x4B, 0, 0 };
+        // Paragraph Focus defaults to Ctrl+Alt+A; Page Focus is off until set.
+        private static readonly uint[] DefMods = new uint[] { 3, 3, 0, 0, 3, 0 };
+        private static readonly uint[] DefVk = new uint[] { 0x48, 0x4B, 0, 0, 0x41, 0 };
+        private readonly uint[] keyMods = new uint[] { 3, 3, 0, 0, 3, 0 };
+        private readonly uint[] keyVk = new uint[] { 0x48, 0x4B, 0, 0, 0x41, 0 };
+        public int KeyCount { get { return keyVk.Length; } }
         private bool hotkeysSuspended = false;
         private ToolStripMenuItem toggleItem, settingsItem;
         private AdvancedForm advanced;
@@ -740,15 +896,41 @@ namespace WordFocus
         }
         public int Count { get { return count; } }
 
+        // Overlap lines: where neighbouring words overlap, the highlight doubles up into a thin line.
+        private volatile bool overlapLines = true;
+        public bool OverlapLines { get { return overlapLines; } }
+        public void SetOverlapLines(bool v) { overlapLines = v; dirty = true; settingsChanged = true; }
+
+        // Pointer visibility while highlighting.
+        private volatile int cursorPercent = DefaultCursorPercent;
+        public int CursorPercent { get { return cursorPercent; } }
+        public void SetCursorPercent(int v)
+        {
+            cursorPercent = Math.Max(0, Math.Min(100, v));
+            settingsChanged = true;
+            try { if (fader != null) fader.SetOpacity(cursorPercent / 100f); } catch { }
+        }
+
+        public static string CountText(int v)
+        {
+            if (v == SentenceValue) return "to the end of the sentence";
+            if (v == LineValue) return "to the end of the line";
+            if (v == LinePlusValue) return "end of the line + first word of the next";
+            if (v == 1) return "1 (just the hovered word)";
+            return v + " (hovered word + next " + (v - 1) + ")";
+        }
+
         public Controller()
         {
-            try { fader = new CursorFader(CursorOpacity); } catch { fader = null; }
+            try { fader = new CursorFader(cursorPercent / 100f); } catch { fader = null; }
             AppDomain.CurrentDomain.ProcessExit += delegate { RestoreCursor(); };
             AppDomain.CurrentDomain.UnhandledException += delegate { RestoreCursor(); };
             Application.ThreadException += delegate { RestoreCursor(); };
 
             LoadSettings();
 
+            focusOverlay = new Overlay();   // created first, so the hover highlight sits on top of it
+            focusOverlay.Show();
             overlay = new Overlay();
             overlay.Show();
             Clear();
@@ -802,6 +984,12 @@ namespace WordFocus
             worker.IsBackground = true;
             worker.SetApartmentState(ApartmentState.MTA);
             worker.Start();
+
+            // Separate worker for Paragraph/Page Focus, so a slow app can only delay the Focus layer.
+            Thread focusWorker = new Thread(FocusLoop);
+            focusWorker.IsBackground = true;
+            focusWorker.SetApartmentState(ApartmentState.MTA);
+            focusWorker.Start();
         }
 
         private void OnHotkey(int id)
@@ -813,6 +1001,8 @@ namespace WordFocus
                 SetCount(count + (id == 3 ? 1 : -1));
                 if (settings != null) settings.SyncFromController();
             }
+            else if (id == 5) RequestFocus(FocusParagraph);
+            else if (id == 6) RequestFocus(FocusPage);
         }
 
         public void Toggle()
@@ -825,11 +1015,11 @@ namespace WordFocus
             if (settings != null) settings.SyncFromController();
         }
 
-        public void SetCount(int v) { count = Math.Max(1, Math.Min(LineModeValue, v)); dirty = true; settingsChanged = true; }
+        public void SetCount(int v) { count = Math.Max(1, Math.Min(MaxCountValue, v)); dirty = true; settingsChanged = true; }
         public void SetOmbre(bool v) { ombre = v; dirty = true; settingsChanged = true; }
         public void SetStrength(int percent) { strengthPercent = Math.Max(10, Math.Min(100, percent)); dirty = true; settingsChanged = true; }
         public int StrengthPercent { get { return strengthPercent; } }
-        public void SetColor(Color c) { HighlightColor = Color.FromArgb(255, c.R, c.G, c.B); dirty = true; settingsChanged = true; }
+        public void SetColor(Color c) { HighlightColor = Color.FromArgb(255, c.R, c.G, c.B); dirty = true; focusDirty = true; settingsChanged = true; }
 
         // ---- Remembered settings: %APPDATA%\WordFocus\settings.txt (plain text, one setting per line) ----
         private volatile bool settingsChanged = false;
@@ -853,11 +1043,21 @@ namespace WordFocus
                     string v = line.Substring(eq + 1).Trim();
                     int n;
                     if (k == "on") enabled = v == "1";
-                    else if (k == "words" && int.TryParse(v, out n)) count = Math.Max(1, Math.Min(LineModeValue, n));
+                    else if (k == "words")
+                    {
+                        if (v == "sentence") count = SentenceValue;
+                        else if (v == "line") count = LineValue;
+                        else if (v == "lineplus") count = LinePlusValue;
+                        else if (int.TryParse(v, out n)) count = n >= 11 ? LineValue : Math.Max(1, n); // 11 meant "line" in older versions
+                    }
+                    else if (k == "overlap") overlapLines = v == "1";
+                    else if (k == "pointer" && int.TryParse(v, out n)) cursorPercent = Math.Max(0, Math.Min(100, n));
                     else if (k == "strength" && int.TryParse(v, out n)) strengthPercent = Math.Max(10, Math.Min(100, n));
                     else if (k == "ombre") ombre = v == "1";
-                    else if (k == "style") underline = v == "underline";
-                    else if (k.StartsWith("key") && k.Length == 4 && k[3] >= '1' && k[3] <= '4')
+                    else if (k == "fstyle" && int.TryParse(v, out n)) focusStyle = Math.Max(0, Math.Min(2, n));
+                    else if (k == "fstrength" && int.TryParse(v, out n)) focusStrength = Math.Max(10, Math.Min(100, n));
+                    else if (k == "style") style = v == "underline" ? StyleUnderline : v == "both" ? StyleBoth : StyleHighlight;
+                    else if (k.StartsWith("key") && k.Length == 4 && k[3] >= '1' && k[3] <= '6')
                     {
                         string[] parts = v.Split(',');
                         uint m, vk;
@@ -881,15 +1081,21 @@ namespace WordFocus
                 string[] lines = new string[] {
                     "# Word Focus settings (saved automatically). Delete this file to go back to defaults.",
                     "on=" + (enabled ? "1" : "0"),
-                    "words=" + count,
+                    "words=" + (count == SentenceValue ? "sentence" : count == LineValue ? "line" : count == LinePlusValue ? "lineplus" : count.ToString()),
+                    "overlap=" + (overlapLines ? "1" : "0"),
+                    "pointer=" + cursorPercent,
                     "strength=" + strengthPercent,
                     "ombre=" + (ombre ? "1" : "0"),
                     "color=" + c.R.ToString("X2") + c.G.ToString("X2") + c.B.ToString("X2"),
-                    "style=" + (underline ? "underline" : "highlight"),
+                    "style=" + (style == StyleUnderline ? "underline" : style == StyleBoth ? "both" : "highlight"),
                     "key1=" + keyMods[0] + "," + keyVk[0],
                     "key2=" + keyMods[1] + "," + keyVk[1],
                     "key3=" + keyMods[2] + "," + keyVk[2],
-                    "key4=" + keyMods[3] + "," + keyVk[3]
+                    "key4=" + keyMods[3] + "," + keyVk[3],
+                    "key5=" + keyMods[4] + "," + keyVk[4],
+                    "key6=" + keyMods[5] + "," + keyVk[5],
+                    "fstyle=" + focusStyle,
+                    "fstrength=" + focusStrength
                 };
                 System.IO.File.WriteAllLines(path, lines);
                 settingsChanged = false;
@@ -939,6 +1145,389 @@ namespace WordFocus
                 List<WordBox> result = boxes;
                 try { overlay.BeginInvoke(new Action(delegate { Render(result); })); } catch { }
             }
+        }
+
+        private void FocusLoop()
+        {
+            while (running)
+            {
+                Thread.Sleep(70);
+                try { FocusStep(); } catch (Exception ex) { Log.Write("Focus ERROR " + ex.GetType().Name + ": " + ex.Message); ClearFocusWorker(); }
+            }
+        }
+
+        // ---- Focus layer (focus worker thread) ----
+        private void FocusStep()
+        {
+            int req = focusRequest;
+            if (req != FocusNone)
+            {
+                focusRequest = FocusNone;
+                if (req == FocusClear) ClearFocusWorker();
+                else StartFocusWorker(req, focusRequestPt);
+            }
+            if (focusRanges == null) return;
+            // Check ~7x a second (the work per check is small and capped). If the app is slow to answer, wait longer.
+            int interval = 140 + focusSlowPenalty;
+            if (unchecked(Environment.TickCount - focusRefreshTick) < interval && !focusDirty && !pageRebuildPending) return;
+            focusRefreshTick = Environment.TickCount;
+
+            // Hide while another window is in front (e.g. you switched apps); show again when you come back.
+            IntPtr fg = Native.GetForegroundWindow();
+            uint fgPid;
+            Native.GetWindowThreadProcessId(fg, out fgPid);
+            bool ours = fgPid == MyPid; // our settings windows count as "still here"
+            bool visible = focusRoot == IntPtr.Zero || fg == focusRoot || ours;
+            int t0 = Environment.TickCount;
+            List<System.Windows.Rect> rawList = new List<System.Windows.Rect>();
+            if (visible) foreach (TextPatternRange fr in focusRanges) rawList.AddRange(fr.GetBoundingRectangles());
+            System.Windows.Rect[] raw = rawList.ToArray();
+            int took = unchecked(Environment.TickCount - t0);
+            // Be gentle with slow apps: back off, and give up on a Focus area that is too heavy to track.
+            focusSlowPenalty = took > 150 ? Math.Min(5000, took * 8) : 0;
+            if (took > 2000 || raw.Length > 1500)
+            {
+                Log.Write("Focus: too heavy for this app (" + took + " ms, " + raw.Length + " shapes) - turned off");
+                ClearFocusWorker();
+                return;
+            }
+            System.Windows.Rect[] rects = TextLinesOnly(raw);
+
+            // Page Focus follows scrolling: when the text moved, re-find the visible body lines
+            // (at most ~3x a second while you scroll, and once more after you stop).
+            if (focusKind == FocusPage && visible)
+            {
+                string moved = rects.Length > 0 ? (int)rects[0].Y + "," + (int)rects[rects.Length - 1].Y + "," + rects.Length : "none";
+                if (moved != lastPagePos) { lastPagePos = moved; pageRebuildPending = true; }
+                if (pageRebuildPending && unchecked(Environment.TickCount - lastPageBuild) >= 300)
+                {
+                    pageRebuildPending = false;
+                    RebuildPage(rects);
+                    raw = new System.Windows.Rect[0];
+                    List<System.Windows.Rect> again = new List<System.Windows.Rect>();
+                    foreach (TextPatternRange fr in focusRanges) again.AddRange(fr.GetBoundingRectangles());
+                    rects = TextLinesOnly(again.ToArray());
+                    lastPagePos = rects.Length > 0 ? (int)rects[0].Y + "," + (int)rects[rects.Length - 1].Y + "," + rects.Length : "none";
+                }
+            }
+
+            string sig = visible + "|" + rects.Length;
+            foreach (System.Windows.Rect r in rects) sig += "|" + (int)r.X + "," + (int)r.Y + "," + (int)r.Width + "," + (int)r.Height;
+            if (sig == focusSig && !focusDirty) return; // nothing moved
+            focusSig = sig;
+            focusDirty = false;
+            System.Windows.Rect[] result = rects;
+            try { focusOverlay.BeginInvoke(new Action(delegate { RenderFocus(result); })); } catch { }
+        }
+
+        // Some apps include the boxes that hold the text (the page, sections, images) along with the
+        // lines themselves. Keep only shapes about the height of a line of text.
+        private static System.Windows.Rect[] TextLinesOnly(System.Windows.Rect[] rects)
+        {
+            if (rects == null || rects.Length == 0) return new System.Windows.Rect[0];
+            List<double> heights = new List<double>();
+            foreach (System.Windows.Rect r in rects) if (r.Height >= 4 && r.Width >= 1) heights.Add(r.Height);
+            if (heights.Count == 0) return new System.Windows.Rect[0];
+            heights.Sort();
+            // The most common line height: the median of the shorter half, so a few huge boxes can't skew it.
+            double typical = heights[(heights.Count - 1) / 4];
+            double maxH = Math.Max(typical * 2.2, 8);
+            List<System.Windows.Rect> keep = new List<System.Windows.Rect>();
+            foreach (System.Windows.Rect r in rects)
+                if (r.Height >= 4 && r.Width >= 1 && r.Height <= maxH) keep.Add(r);
+            return keep.ToArray();
+        }
+
+        private void ClearFocusWorker()
+        {
+            focusRanges = null;
+            focusRoot = IntPtr.Zero;
+            focusSig = "";
+            focusKind = FocusNone;
+            try { focusOverlay.BeginInvoke(new Action(delegate { RenderFocus(null); })); } catch { }
+        }
+
+        private class LineInfo { public TextPatternRange Range; public System.Windows.Rect Box; }
+
+        private static System.Windows.Rect Union(System.Windows.Rect[] rs)
+        {
+            System.Windows.Rect u = rs[0];
+            for (int i = 1; i < rs.Length; i++) u.Union(rs[i]);
+            return u;
+        }
+
+        // Steps line by line (dir = -1 up, +1 down) from 'from' while lines are inside the window,
+        // collecting each visible line. At most 120 steps, so it never gets expensive.
+        private static List<LineInfo> WalkLines(TextPatternRange from, int dir, double winTop, double winBottom)
+        {
+            List<LineInfo> found = new List<LineInfo>();
+            TextPatternRange probe = from.Clone();
+            int blanks = 0;
+            for (int i = 0; i < 120; i++)
+            {
+                if (probe.Move(TextUnit.Line, dir) == 0) break;   // start or end of the document
+                probe.ExpandToEnclosingUnit(TextUnit.Line);
+                System.Windows.Rect[] rs = probe.GetBoundingRectangles();
+                if (rs.Length == 0) { if (++blanks > 3) break; continue; } // blank or hidden line; allow a few
+                blanks = 0;
+                System.Windows.Rect box = Union(rs);
+                if (dir < 0 && box.Bottom < winTop) break;     // scrolled above the window
+                if (dir > 0 && box.Top > winBottom) break;     // below the window
+                LineInfo li = new LineInfo(); li.Range = probe.Clone(); li.Box = box;
+                found.Add(li);
+            }
+            return found;
+        }
+
+        // Controls whose text isn't reading material (links inside body text are NOT in this list).
+        private static readonly ControlType[] NotBodyTypes = new ControlType[] {
+            ControlType.Button, ControlType.SplitButton, ControlType.Edit, ControlType.ComboBox,
+            ControlType.Menu, ControlType.MenuBar, ControlType.MenuItem, ControlType.ToolBar,
+            ControlType.Tab, ControlType.TabItem, ControlType.CheckBox, ControlType.RadioButton,
+            ControlType.Spinner, ControlType.Slider, ControlType.ScrollBar, ControlType.Header,
+            ControlType.HeaderItem, ControlType.TitleBar, ControlType.StatusBar, ControlType.ToolTip
+        };
+
+        // Skip a line if the item it sits in (or one just above it) is a heading or a control like a button,
+        // text box, drop-down, menu or tab. Works with the built-in Windows accessibility component.
+        private static bool IsHeadingLine(TextPatternRange r)
+        {
+            try
+            {
+                AutomationElement e = r.GetEnclosingElement();
+                TreeWalker walker = TreeWalker.ControlViewWalker;
+                for (int hops = 0; e != null && hops < 3; hops++)
+                {
+                    if (IsDocument(e)) break;
+                    string t = e.Current.LocalizedControlType;
+                    if (t != null && t.ToLowerInvariant().Contains("heading")) return true;
+                    ControlType ct = e.Current.ControlType;
+                    foreach (ControlType nb in NotBodyTypes) if (ct == nb) return true;
+                    e = walker.GetParent(e);
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        // Body text = lines in the same column as the line you pointed at, not much taller than it, and not headings.
+        private static bool IsBodyLine(LineInfo li, System.Windows.Rect startBox)
+        {
+            if (li.Box.Height > startBox.Height * 1.3) return false;                       // big title text
+            if (li.Box.Right <= startBox.Left || li.Box.Left >= startBox.Right) return false; // other column (menus, sidebars)
+            if (IsHeadingLine(li.Range)) return false;
+            return true;
+        }
+
+        // Page Focus state (focus worker only): used to re-find the visible body lines after scrolling.
+        private TextPattern pageTp;
+        private System.Windows.Rect pageColumn;
+        private int lastPageBuild;
+        private bool pageRebuildPending;
+
+        // Walks up and down from 'start' to the window edges and joins the body lines into runs.
+        private static List<TextPatternRange> BuildPageRuns(TextPatternRange start, System.Windows.Rect column,
+                                                            double winTop, double winBottom, bool startIsPointed)
+        {
+            int tw = Environment.TickCount;
+            List<TextPatternRange> runs = new List<TextPatternRange>();
+            System.Windows.Rect[] startRects = start.GetBoundingRectangles();
+            if (startRects.Length == 0) return runs;
+            LineInfo startLine = new LineInfo(); startLine.Range = start; startLine.Box = Union(startRects);
+            List<LineInfo> up = WalkLines(start, -1, winTop, winBottom);
+            List<LineInfo> down = WalkLines(start, 1, winTop, winBottom);
+            up.Reverse();
+            List<LineInfo> all = new List<LineInfo>(up);
+            all.Add(startLine);
+            all.AddRange(down);
+
+            // Join neighbouring body lines into runs (fewer, bigger ranges = fewer questions to the app later).
+            TextPatternRange run = null;
+            int kept = 0;
+            foreach (LineInfo li in all)
+            {
+                bool body = (li == startLine && startIsPointed) ? !IsHeadingLine(li.Range) : IsBodyLine(li, column);
+                if (body)
+                {
+                    kept++;
+                    if (run == null) run = li.Range.Clone();
+                    else run.MoveEndpointByRange(TextPatternRangeEndpoint.End, li.Range, TextPatternRangeEndpoint.End);
+                }
+                else if (run != null) { runs.Add(run); run = null; }
+            }
+            if (run != null) runs.Add(run);
+            Log.Write("Page focus: " + all.Count + " visible lines, " + kept + " body lines in " + runs.Count + " runs; window " +
+                      winTop + ".." + winBottom + "; took " + unchecked(Environment.TickCount - tw) + " ms");
+            return runs;
+        }
+
+        // After a scroll: start again from the body line nearest the middle of the window and re-walk,
+        // so lines that scrolled into view light up and ones that left drop off.
+        private void RebuildPage(System.Windows.Rect[] currentRects)
+        {
+            Native.RECT wr;
+            if (pageTp == null || focusRoot == IntPtr.Zero || !Native.GetWindowRect(focusRoot, out wr)) return;
+            double mid = (wr.Top + wr.Bottom) / 2.0;
+            System.Windows.Point anchor;
+            System.Windows.Rect best = System.Windows.Rect.Empty;
+            double bestDist = double.MaxValue;
+            foreach (System.Windows.Rect r in currentRects)
+            {
+                if (r.Bottom < wr.Top || r.Top > wr.Bottom) continue;
+                double d = Math.Abs((r.Top + r.Bottom) / 2 - mid);
+                if (d < bestDist) { bestDist = d; best = r; }
+            }
+            if (!best.IsEmpty) anchor = new System.Windows.Point(best.Left + Math.Min(best.Width / 2, 20), (best.Top + best.Bottom) / 2);
+            else anchor = new System.Windows.Point(pageColumn.Left + Math.Min(pageColumn.Width / 2, 20), mid); // everything scrolled away
+
+            TextPatternRange start;
+            try { start = pageTp.RangeFromPoint(anchor); start.ExpandToEnclosingUnit(TextUnit.Line); }
+            catch { return; }
+            List<TextPatternRange> runs = BuildPageRuns(start, pageColumn, wr.Top, wr.Bottom, false);
+            if (runs.Count > 0) focusRanges = runs;
+            lastPageBuild = Environment.TickCount;
+        }
+
+        private static AutomationElement FindDocument(AutomationElement e)
+        {
+            TreeWalker walker = TreeWalker.ControlViewWalker;
+            for (int hops = 0; e != null && hops < 40; hops++)
+            {
+                if (IsDocument(e) && GetTP(e) != null) return e;
+                try { e = walker.GetParent(e); } catch { return null; }
+            }
+            return null;
+        }
+
+        private void StartFocusWorker(int kind, Native.POINT p)
+        {
+            System.Windows.Point pt = new System.Windows.Point(p.X, p.Y);
+            AutomationElement el = AutomationElement.FromPoint(pt);
+            AutomationElement src; string how;
+            TextPattern tp = FindTextPattern(el, pt, out src, out how);
+            if (tp == null) { Log.Write("Focus: no text under mouse"); ClearFocusWorker(); return; }
+            AutomationElement doc = FindDocument(src ?? el);
+            TextPattern docTp = doc != null ? GetTP(doc) : null;
+
+            TextPatternRange range = null;
+            if (kind == FocusPage)
+            {
+                // "Page" = the lines visible in that window. Built line by line outward from the mouse,
+                // with a hard cap, so a huge document (e.g. a 1000-page PDF) costs no more than a short one.
+                TextPattern pageTp0 = docTp ?? tp;
+                TextPatternRange start = null;
+                if (docTp != null && src != null && !IsDocument(src)) { try { start = docTp.RangeFromChild(src); } catch { start = null; } }
+                if (start == null) start = pageTp0.RangeFromPoint(pt);
+                start.ExpandToEnclosingUnit(TextUnit.Line);
+
+                IntPtr root = Native.GetAncestor(Native.WindowFromPoint(p), 2);
+                Native.RECT wr;
+                double winTop = double.MinValue, winBottom = double.MaxValue;
+                if (root != IntPtr.Zero && Native.GetWindowRect(root, out wr)) { winTop = wr.Top; winBottom = wr.Bottom; }
+
+                System.Windows.Rect[] startRects = start.GetBoundingRectangles();
+                if (startRects.Length == 0) { Log.Write("Focus: line under mouse has no shape"); ClearFocusWorker(); return; }
+                System.Windows.Rect column = Union(startRects);   // the column + line height to treat as body text
+                List<TextPatternRange> runs = BuildPageRuns(start, column, winTop, winBottom, true);
+                if (runs.Count == 0) { Log.Write("Focus: no body text found"); ClearFocusWorker(); return; }
+                pageTp = pageTp0;
+                pageColumn = column;
+                lastPageBuild = Environment.TickCount;
+                pageRebuildPending = false;
+                StartFocusRanges(kind, p, runs, how);
+                return;
+            }
+            else
+            {
+                // Paragraph: ask the whole page for the paragraph containing this text, so links/bold
+                // in the middle of a paragraph don't cut it short. Fall back to the local text.
+                if (docTp != null && src != null && !IsDocument(src))
+                {
+                    try { range = docTp.RangeFromChild(src); } catch { range = null; }
+                }
+                if (range == null) range = tp.RangeFromPoint(pt);
+                range.ExpandToEnclosingUnit(TextUnit.Paragraph);
+            }
+
+            System.Windows.Rect[] firstRects = range.GetBoundingRectangles();
+            Log.Write("Focus range: " + firstRects.Length + " shapes, " + TextLinesOnly(firstRects).Length + " kept as text lines; via " + how + " " + Describe(src) + " doc=" + (docTp != null));
+            if (TextLinesOnly(firstRects).Length == 0) { Log.Write("Focus: range has no visible text lines"); ClearFocusWorker(); return; }
+            List<TextPatternRange> one = new List<TextPatternRange>();
+            one.Add(range);
+            StartFocusRanges(kind, p, one, how);
+        }
+
+        private void StartFocusRanges(int kind, Native.POINT p, List<TextPatternRange> ranges, string how)
+        {
+            focusRanges = ranges;
+            focusRoot = Native.GetAncestor(Native.WindowFromPoint(p), 2); // GA_ROOT: the app's main window
+            focusKind = kind;
+            focusSig = "";
+            focusDirty = true;
+            focusRefreshTick = 0;
+            focusSlowPenalty = 0;
+            Log.Write("Focus " + (kind == FocusPage ? "page" : "paragraph") + " via " + how);
+        }
+
+        // ---- Focus layer drawing (UI thread) ----
+        private void RenderFocus(System.Windows.Rect[] rects)
+        {
+            if (rects == null || rects.Length == 0) { ClearOverlay(focusOverlay); return; }
+            double l = double.MaxValue, t = double.MaxValue, r = double.MinValue, b = double.MinValue;
+            foreach (System.Windows.Rect rc in rects)
+            {
+                l = Math.Min(l, rc.Left); t = Math.Min(t, rc.Top);
+                r = Math.Max(r, rc.Right); b = Math.Max(b, rc.Bottom);
+            }
+            int x0 = (int)Math.Floor(l) - 2, y0 = (int)Math.Floor(t) - 2;
+            int w0 = (int)Math.Ceiling(r) - x0 + 2, h0 = (int)Math.Ceiling(b) - y0 + 2;
+            if (w0 < 1 || h0 < 1 || w0 > 10000 || h0 > 10000) { ClearOverlay(focusOverlay); return; }
+
+            int st = focusStyle;
+            int alpha = focusStrength * 255 / 100;
+            using (Bitmap bmp = new Bitmap(w0, h0, PixelFormat.Format32bppArgb))
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                Color lineColor = Color.Black;
+                if (st == StyleBoth) lineColor = IsDarkBehind(x0, y0, w0, h0) ? Color.White : Color.Black;
+                using (SolidBrush hb = new SolidBrush(Color.FromArgb(alpha, HighlightColor)))
+                using (SolidBrush lb = new SolidBrush(lineColor))
+                {
+                    foreach (System.Windows.Rect rc in rects)
+                    {
+                        RectangleF rf = new RectangleF((float)(rc.Left - x0), (float)(rc.Top - y0), (float)rc.Width, (float)rc.Height);
+                        if (rf.Width < 1 || rf.Height < 1) continue;
+                        float thick = Math.Max(2f, rf.Height * 0.12f);
+                        RectangleF line = new RectangleF(rf.X, rf.Bottom - thick, rf.Width, thick);
+                        if (st == StyleHighlight || st == StyleBoth) g.FillRectangle(hb, rf);
+                        if (st == StyleUnderline) g.FillRectangle(hb, line);
+                        if (st == StyleBoth) g.FillRectangle(lb, line);
+                    }
+                }
+                focusOverlay.SetBitmap(bmp, x0, y0);
+                overlay.BringToTop(); // hover highlight stays above the Focus layer
+            }
+        }
+
+        private static void ClearOverlay(Overlay ov)
+        {
+            using (Bitmap b = new Bitmap(1, 1, PixelFormat.Format32bppArgb))
+            {
+                b.SetPixel(0, 0, Color.Transparent);
+                ov.SetBitmap(b, 0, 0);
+            }
+        }
+
+        // True if a word ends a sentence: . ! or ? possibly followed by closing quotes/brackets.
+        private static bool EndsSentence(string s)
+        {
+            if (s == null) return false;
+            string t = s.TrimEnd();
+            while (t.Length > 0 && "\"')]}\u201D\u2019".IndexOf(t[t.Length - 1]) >= 0) t = t.Substring(0, t.Length - 1);
+            if (t.Length == 0) return false;
+            char c = t[t.Length - 1];
+            return c == '.' || c == '!' || c == '?' || c == '\u2026';
         }
 
         private static bool HasWordChar(string s)
@@ -1072,8 +1661,10 @@ namespace WordFocus
             Log.Write("Q " + p.X + "," + p.Y + " el=" + elInfo + (cur == null ? " MISS" : " OK") + tried);
             if (cur == null) return null;
 
-            bool lineMode = count >= LineModeValue;
-            int want = lineMode ? 300 : count;
+            int mode = count;
+            bool lineMode = mode == LineValue || mode == LinePlusValue;
+            bool sentenceMode = mode == SentenceValue;
+            int want = lineMode ? 300 : sentenceMode ? 60 : count;
             double lineMid = firstRects[0].Top + firstRects[0].Height / 2;
             double lineH = firstRects[0].Height;
 
@@ -1088,9 +1679,14 @@ namespace WordFocus
                     if (lineMode)
                     {
                         double mid = rects[0].Top + rects[0].Height / 2;
-                        if (Math.Abs(mid - lineMid) > lineH * 0.5) break; // reached the next line
+                        if (Math.Abs(mid - lineMid) > lineH * 0.5) // reached the next line
+                        {
+                            if (mode == LinePlusValue) list.Add(new WordBox(rects)); // ...include its first word
+                            break;
+                        }
                     }
                     list.Add(new WordBox(rects));
+                    if (sentenceMode && EndsSentence(text)) break;
                 }
                 if (cur.Move(TextUnit.Word, 1) == 0) break; // end of text
                 cur.ExpandToEnclosingUnit(TextUnit.Word);
@@ -1120,6 +1716,32 @@ namespace WordFocus
             }
         }
 
+        // Looks at the screen behind the words (our own see-through overlay isn't captured) and
+        // returns true if the background is dark. Uses the median brightness, so the text itself barely counts.
+        private static bool IsDarkBehind(int x, int y, int w, int h)
+        {
+            try
+            {
+                using (Bitmap shot = new Bitmap(w, h, PixelFormat.Format32bppRgb))
+                {
+                    using (Graphics sg = Graphics.FromImage(shot))
+                        sg.CopyFromScreen(x, y, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
+                    List<int> lum = new List<int>();
+                    int stepX = Math.Max(1, w / 40), stepY = Math.Max(1, h / 10);
+                    for (int yy = 0; yy < h; yy += stepY)
+                        for (int xx = 0; xx < w; xx += stepX)
+                        {
+                            Color c = shot.GetPixel(xx, yy);
+                            lum.Add((c.R * 299 + c.G * 587 + c.B * 114) / 1000);
+                        }
+                    if (lum.Count == 0) return false;
+                    lum.Sort();
+                    return lum[lum.Count / 2] < 128;
+                }
+            }
+            catch { return false; }
+        }
+
         private void Render(List<WordBox> boxes)
         {
             if (!enabled || boxes == null || boxes.Count == 0) { Clear(); return; }
@@ -1143,6 +1765,9 @@ namespace WordFocus
             {
                 g.Clear(Color.Transparent);
                 int n = boxes.Count;
+                int st = style;
+                Region painted = overlapLines ? null : new Region(RectangleF.Empty);
+                List<RectangleF> lines = st == StyleBoth ? new List<RectangleF>() : null;
                 for (int i = 0; i < n; i++)
                 {
                     int a0 = AlphaAt(i, n), a1 = AlphaAt(i + 1, n);
@@ -1151,19 +1776,35 @@ namespace WordFocus
                         RectangleF rf = new RectangleF((float)(rc.Left - x0) - 1, (float)(rc.Top - y0),
                                                        (float)rc.Width + 2, (float)rc.Height);
                         if (rf.Width < 1 || rf.Height < 1) continue;
-                        if (underline)
-                        {
-                            float thick = Math.Max(2f, rf.Height * 0.12f);
+                        float thick = Math.Max(2f, rf.Height * 0.12f);
+                        if (lines != null) lines.Add(new RectangleF(rf.X + 1, rf.Bottom - thick, rf.Width - 2, thick));
+                        if (st == StyleUnderline)
                             rf = new RectangleF(rf.X, rf.Bottom - thick, rf.Width, thick);
-                        }
                         RectangleF brushRect = new RectangleF(rf.X - 1, rf.Y, rf.Width + 2, rf.Height);
                         using (LinearGradientBrush br = new LinearGradientBrush(brushRect,
                                    Color.FromArgb(a0, HighlightColor), Color.FromArgb(a1, HighlightColor),
                                    LinearGradientMode.Horizontal))
                         {
-                            g.FillRectangle(br, rf);
+                            if (painted == null) g.FillRectangle(br, rf);
+                            else
+                            {
+                                // Paint only where nothing has been painted yet, so neighbours don't double up.
+                                g.SetClip(painted, CombineMode.Exclude);
+                                g.FillRectangle(br, rf);
+                                g.ResetClip();
+                                painted.Union(rf);
+                            }
                         }
                     }
+                }
+                if (painted != null) painted.Dispose();
+
+                // "Both": solid underline, white on dark pages and black on light pages.
+                if (lines != null && lines.Count > 0)
+                {
+                    Color lineColor = IsDarkBehind(x0, y0, w0, h0) ? Color.White : Color.Black;
+                    using (SolidBrush lb = new SolidBrush(lineColor))
+                        foreach (RectangleF lr in lines) g.FillRectangle(lb, lr);
                 }
                 overlay.SetBitmap(bmp, x0, y0);
             }
@@ -1176,6 +1817,7 @@ namespace WordFocus
         private static readonly object gate = new object();
         private static System.IO.StreamWriter w;
         private static int lines = 0;
+        public static bool Hover = false;   // routine hover lines off
         public static bool Enabled = false; // diagnostic log off; set to true to write WordFocus-log.txt again
         public static void Start(string folder)
         {
@@ -1193,6 +1835,7 @@ namespace WordFocus
             lock (gate)
             {
                 if (w == null || lines >= 3000) return;
+                if (!Hover && msg.StartsWith("Q ") && msg.IndexOf("ERROR") < 0) return; // skip routine hover lines this round
                 lines++;
                 try { w.WriteLine(DateTime.Now.ToString("HH:mm:ss.fff") + "  " + msg); } catch { }
             }

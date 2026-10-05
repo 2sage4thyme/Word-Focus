@@ -2,15 +2,16 @@
 
 **Highlight the word under your mouse, plus the next few words, in any Windows app.** A free reading-focus aid that helps your eyes stay on the line. It may help with ADHD, dyslexia, or plain reading fatigue.
 
-Press a hotkey, move your mouse over text, and the word you're pointing at lights up with a soft color that fades across the next few words. Your mouse pointer turns almost invisible while it's over text, so it doesn't block what you're reading.
+Press a hotkey, move your mouse over text, and the word you're pointing at lights up with a soft color that fades across the next few words. Your mouse pointer fades while it's over text (you choose how much), so it doesn't block what you're reading.
 
 - Works across your desktop, not just in a browser: Claude, Chrome, Edge, Word, Notepad, PDFs opened in a browser, web textbook readers, and more
-- Choose how many words to highlight: 1 to 10, or the rest of the line
-- Highlight or underline style
-- Ombre fade or one solid color
+- Choose how many words to highlight: 1 to 10, to the end of the sentence, to the end of the line, or the end of the line plus the first word of the next line
+- Highlight, underline, or both. In "both", the highlight uses your color and the underline automatically turns white on dark pages and black on light ones
+- Ombre fade or one solid color, with or without thin overlap lines where words meet
 - Adjustable highlight strength, from faint to solid
 - Six preset colors plus a custom color picker
 - Turn it on and off with **Ctrl+Alt+H**
+- **Paragraph Focus** and **Page Focus**: point at text and press a hotkey to softly light up the whole paragraph, or all the body text visible in the window (skipping headings, buttons, and side menus, and following along as you scroll), while the hover highlight keeps working on top
 - Choose your own hotkeys, including optional keys to change the word count on the fly
 - Optional **Start with Windows** box, so it's always ready
 - Nothing to install: it runs with PowerShell, which is built into Windows
@@ -33,12 +34,13 @@ To quit, right-click the tray icon and choose **Exit**.
 | Key | What it does |
 |---|---|
 | Ctrl+Alt+H | Turn the highlight on or off |
-| Ctrl+Alt+K | Open settings (word count, highlight strength, ombre on/off, color, start with Windows) |
+| Ctrl+Alt+K | Open settings (word count, ombre, overlap lines, highlight strength, pointer visibility, color, start with Windows) |
+| Ctrl+Alt+A | Paragraph Focus: light up the paragraph under the mouse (press again to turn off) |
 | Tray icon, right-click | On/off, settings, exit |
 
-To change the style (highlight or underline), pick your own hotkeys, or add keys that highlight one more or one fewer word, open settings and click **Advanced...**. The word-count keys are off until you set them. If another program already uses one of the hotkeys, Word Focus tells you when it starts, and you can choose a different one there.
+To change the style (highlight, underline, or both), pick your own hotkeys, or add keys that highlight one more or one fewer word, open settings and click **Advanced...**. The word-count keys and Page Focus are off until you give them a hotkey there. Advanced also has the style (highlight, underline, or both) and strength for the Paragraph and Page Focus layer, which starts at 10%. If another program already uses one of the hotkeys, Word Focus tells you when it starts, and you can choose a different one there.
 
-Your settings, including whether the highlight was on, are remembered between sessions and restarts. They're saved in `%APPDATA%\WordFocus\settings.txt`. To go back to the defaults (3 words, 60% strength, ombre on, yellow), exit Word Focus and delete that file.
+Your settings, including whether the highlight was on, are remembered between sessions and restarts. They're saved in `%APPDATA%\WordFocus\settings.txt`. To go back to the defaults (3 words, ombre on, overlap lines on, 60% strength, pointer 10% visible, yellow), exit Word Focus and delete that file.
 
 ## Where it works, and where it doesn't
 
@@ -60,7 +62,7 @@ You can read all of the code in `WordFocus.ps1` before running it.
 
 ## Requirements
 
-- Windows 10 (tested). Windows 11 should work but hasn't been tested yet.
+- Windows 10 or Windows 11 (both tested).
 
 ## How it was made
 
