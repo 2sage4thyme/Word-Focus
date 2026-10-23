@@ -5,6 +5,8 @@
 #   Ctrl+Alt+K  = open settings (word count, ombre, strength, pointer, color, and more)
 #   Ctrl+Alt+A  = Paragraph Focus (point at text; press again to turn off)
 #   Ctrl+Alt+B  = Page Focus (point at text; press again to turn off)
+#   Reader: inside a Focus area, Ctrl+click a word to start; Ctrl+click again to pause; the next
+#   Ctrl+click starts from where you click. The Play/Pause key also pauses / resumes.
 #   Every action can have its own hotkey: Settings > Advanced > Hotkeys...
 #   Tray icon (bottom-right) -> Exit to quit.
 # What this script does: compiles the C# code below in memory (using Windows' built-in
@@ -13,6 +15,9 @@
 # does not start with Windows unless you tick "Start with Windows" in settings
 # (that adds a shortcut to your personal Startup folder; unticking removes it). It only reads the text under your mouse through
 # Windows' accessibility interface (UI Automation) and draws a see-through overlay.
+# While a Paragraph / Page Focus area is showing, it watches mouse clicks (only to catch Ctrl+click
+# inside that area for the Reader) and, while the Reader runs, claims the Play/Pause key. Nothing is recorded.
+# Read aloud uses Windows' built-in voices.
 # While a highlight is showing, it temporarily swaps the arrow, text I-beam and link-hand
 # pointers for see-through copies (in memory only), and puts your normal pointers back
 # when you stop hovering, turn it off, or exit. Nothing about your pointers is saved.
@@ -20,13 +25,14 @@
 
 $ErrorActionPreference = 'Stop'
 try {
-    Add-Type -AssemblyName System.Windows.Forms, System.Drawing, UIAutomationClient, UIAutomationTypes, WindowsBase
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing, UIAutomationClient, UIAutomationTypes, WindowsBase, System.Speech
     $refs = @(
         [System.Windows.Forms.Form].Assembly.Location,
         [System.Drawing.Bitmap].Assembly.Location,
         [System.Windows.Automation.AutomationElement].Assembly.Location,
         [System.Windows.Automation.Text.TextUnit].Assembly.Location,
-        [System.Windows.Rect].Assembly.Location
+        [System.Windows.Rect].Assembly.Location,
+        [System.Speech.Synthesis.SpeechSynthesizer].Assembly.Location
     )
     $code = @'
 // Word Focus - highlights the word under the mouse plus the next few words.
@@ -41,6 +47,7 @@ using System.Threading;
 using System.Windows.Forms;
 using System.Windows.Automation;
 using System.Windows.Automation.Text;
+using System.Speech.Synthesis;
 
 namespace WordFocus
 {
@@ -56,6 +63,14 @@ namespace WordFocus
 
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MSLLHOOKSTRUCT { public POINT pt; public uint mouseData; public uint flags; public uint time; public IntPtr extra; }
+        [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc fn, IntPtr hMod, uint threadId);
+        [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr hhk);
+        [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll")] public static extern IntPtr GetModuleHandle(string name);
+        [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
         [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
@@ -380,16 +395,16 @@ namespace WordFocus
             overlapBox.CheckedChanged += delegate { ctl.SetOverlapLines(overlapBox.Checked); };
             Controls.Add(overlapBox);
 
-            // Highlight strength: 10% = faint, 100% = solid.
+            // Highlight strength: 5% = faint, 100% = solid.
             strengthLabel = MakeLabel(198);
-            strength = MakeSlider(1, 10, 1, 1, 1, 216); // tens: 10%..100%
-            strength.ValueChanged += delegate { ctl.SetStrength(strength.Value * 10); UpdateStrengthLabel(); };
+            strength = MakeSlider(1, 20, 2, 1, 1, 216); // steps of 5: 5%..100%
+            strength.ValueChanged += delegate { ctl.SetStrength(strength.Value * 5); UpdateStrengthLabel(); };
             Controls.Add(strength);
 
             // Pointer visibility while highlighting: 0% = invisible, 100% = normal.
             pointerLabel = MakeLabel(262);
-            pointer = MakeSlider(0, 10, 1, 1, 1, 280); // tens: 0%..100%
-            pointer.ValueChanged += delegate { ctl.SetCursorPercent(pointer.Value * 10); UpdatePointerLabel(); };
+            pointer = MakeSlider(0, 20, 2, 1, 1, 280); // steps of 5: 0%..100%
+            pointer.ValueChanged += delegate { ctl.SetCursorPercent(pointer.Value * 5); UpdatePointerLabel(); };
             Controls.Add(pointer);
 
             // Color row: preset swatches + a "Custom..." button that opens the Windows color picker.
@@ -473,18 +488,18 @@ namespace WordFocus
             slider.Value = ctl.Count;
             ombreBox.Checked = ctl.Ombre;
             overlapBox.Checked = ctl.OverlapLines;
-            strength.Value = Math.Max(1, Math.Min(10, (ctl.StrengthPercent + 5) / 10));
-            pointer.Value = Math.Max(0, Math.Min(10, (ctl.CursorPercent + 5) / 10));
+            strength.Value = Math.Max(1, Math.Min(20, (ctl.StrengthPercent + 2) / 5));
+            pointer.Value = Math.Max(0, Math.Min(20, (ctl.CursorPercent + 2) / 5));
             UpdateStrengthLabel();
             UpdatePointerLabel();
             UpdateLabel();
         }
 
-        private void UpdateStrengthLabel() { strengthLabel.Text = "Highlight strength: " + (strength.Value * 10) + "%"; }
+        private void UpdateStrengthLabel() { strengthLabel.Text = "Highlight strength: " + (strength.Value * 5) + "%"; }
 
         private void UpdatePointerLabel()
         {
-            int v = pointer.Value * 10;
+            int v = pointer.Value * 5;
             pointerLabel.Text = "Mouse pointer while over text: " + v + "% visible" +
                 (v == 0 ? " (invisible)" : v == 100 ? " (normal)" : "");
         }
@@ -576,6 +591,14 @@ namespace WordFocus
         private readonly RadioButton fHlRadio, fUlRadio, fBothRadio;
         private readonly TrackBar fStrength;
         private readonly Label fStrengthLabel;
+        private readonly TrackBar rSpeed, rWords, rPause;
+        private readonly RadioButton rHlRadio, rUlRadio, rBothRadio;
+        private readonly Label rSpeedLabel, rWordsLabel, rPauseLabel;
+        private readonly ComboBox rClick;
+        private readonly CheckBox ttsBox;
+        private readonly ComboBox ttsVoice;
+        private readonly Label volLabel;
+        private readonly TrackBar ttsVol;
 
         private const int W = 360;
 
@@ -635,29 +658,159 @@ namespace WordFocus
             fStrengthLabel.SetBounds(14, 154, W - 28, 20);
             Controls.Add(fStrengthLabel);
             fStrength = new TrackBar();
-            fStrength.Minimum = 1; fStrength.Maximum = 10; fStrength.TickFrequency = 1;
+            fStrength.Minimum = 1; fStrength.Maximum = 20; fStrength.TickFrequency = 2;
             fStrength.SmallChange = 1; fStrength.LargeChange = 1;
             fStrength.SetBounds(10, 172, W - 20, 45);
-            fStrength.ValueChanged += delegate { ctl.SetFocusStrength(fStrength.Value * 10); UpdateFocusLabel(); };
+            fStrength.ValueChanged += delegate { ctl.SetFocusStrength(fStrength.Value * 5); UpdateFocusLabel(); };
             Controls.Add(fStrength);
 
+            // --- Reader ---
+            Heading("Reader", 222);
+            Button testBtn = new Button();
+            testBtn.Text = "Test my speed...";
+            testBtn.SetBounds(W - 134, 218, 120, 26);
+            testBtn.Click += delegate
+            {
+                using (SpeedTestForm t = new SpeedTestForm(ctl)) { t.ShowDialog(this); }
+                SyncFromController();
+            };
+            Controls.Add(testBtn);
+            testBtn.BringToFront();
+            Label rHint = new Label();
+            rHint.Text = "Inside a Paragraph / Page Focus area, hold the key below and click a word to start reading there. Click again to pause; the next click starts from wherever you click. Play/Pause key also pauses.";
+            rHint.ForeColor = SystemColors.GrayText;
+            rHint.SetBounds(14, 244, W - 28, 44);
+            Controls.Add(rHint);
+            StyleRow(290, out rHlRadio, out rUlRadio, out rBothRadio);
+            rHlRadio.CheckedChanged += delegate { if (rHlRadio.Checked) ctl.SetReaderStyle(Controller.StyleHighlight); };
+            rUlRadio.CheckedChanged += delegate { if (rUlRadio.Checked) ctl.SetReaderStyle(Controller.StyleUnderline); };
+            rBothRadio.CheckedChanged += delegate { if (rBothRadio.Checked) ctl.SetReaderStyle(Controller.StyleBoth); };
+            Label rColorLabel = new Label();
+            rColorLabel.Text = "Color:";
+            rColorLabel.SetBounds(14, 324, 42, 20);
+            Controls.Add(rColorLabel);
+            string[] cnames = new string[] { "Yellow", "Green", "Blue", "Pink", "Orange", "Purple" };
+            for (int i = 0; i < Controller.Presets.Length; i++)
+            {
+                Button sw = new Button();
+                sw.FlatStyle = FlatStyle.Flat;
+                sw.BackColor = Controller.Presets[i];
+                sw.SetBounds(60 + i * 30, 320, 26, 26);
+                Color picked = Controller.Presets[i];
+                sw.Click += delegate { ctl.SetReaderColor(picked); };
+                tips.SetToolTip(sw, cnames[i]);
+                Controls.Add(sw);
+            }
+            Button rCustom = new Button();
+            rCustom.Text = "Custom...";
+            rCustom.SetBounds(W - 104, 319, 90, 28);
+            rCustom.Click += delegate
+            {
+                using (ColorDialog dlg = new ColorDialog())
+                {
+                    dlg.Color = ctl.ReaderColor;
+                    dlg.FullOpen = true;
+                    if (dlg.ShowDialog(this) == DialogResult.OK) ctl.SetReaderColor(dlg.Color);
+                }
+            };
+            Controls.Add(rCustom);
+
+            rSpeedLabel = new Label();
+            rSpeedLabel.SetBounds(14, 356, W - 28, 20);
+            Controls.Add(rSpeedLabel);
+            rSpeed = new TrackBar();
+            rSpeed.Minimum = 3; rSpeed.Maximum = 30; rSpeed.TickFrequency = 3;   // x20 = 60..600 words per minute
+            rSpeed.SmallChange = 1; rSpeed.LargeChange = 1;
+            rSpeed.SetBounds(10, 374, W - 20, 45);
+            rSpeed.ValueChanged += delegate { ctl.SetReaderWpm(rSpeed.Value * 20); UpdateReaderLabels(); };
+            Controls.Add(rSpeed);
+            rWordsLabel = new Label();
+            rWordsLabel.SetBounds(14, 420, W - 28, 20);
+            Controls.Add(rWordsLabel);
+            rWords = new TrackBar();
+            rWords.Minimum = 1; rWords.Maximum = 10; rWords.TickFrequency = 1;
+            rWords.SmallChange = 1; rWords.LargeChange = 1;
+            rWords.SetBounds(10, 438, W - 20, 45);
+            rWords.ValueChanged += delegate { ctl.SetReaderWords(rWords.Value); UpdateReaderLabels(); };
+            Controls.Add(rWords);
+            rPauseLabel = new Label();
+            rPauseLabel.SetBounds(14, 484, W - 28, 20);
+            Controls.Add(rPauseLabel);
+            rPause = new TrackBar();
+            rPause.Minimum = 0; rPause.Maximum = 20; rPause.TickFrequency = 5;   // tenths of a second: 0..2 s
+            rPause.SmallChange = 1; rPause.LargeChange = 1;
+            rPause.SetBounds(10, 502, W - 20, 45);
+            rPause.ValueChanged += delegate { ctl.SetReaderPauseMs(rPause.Value * 100); UpdateReaderLabels(); };
+            Controls.Add(rPause);
+            Label clickLabel = new Label();
+            clickLabel.Text = "Start / jump with:";
+            clickLabel.SetBounds(14, 551, 110, 20);
+            Controls.Add(clickLabel);
+            rClick = new ComboBox();
+            rClick.DropDownStyle = ComboBoxStyle.DropDownList;
+            rClick.Items.AddRange(new object[] { "Off (use a hotkey)", "Ctrl + click", "Alt + click", "Shift + click" });
+            rClick.SetBounds(128, 547, 150, 24);
+            rClick.SelectedIndexChanged += delegate { if (rClick.SelectedIndex >= 0) ctl.SetReaderClickMod(rClick.SelectedIndex); };
+            Controls.Add(rClick);
+
+            // --- Read aloud ---
+            ttsBox = new CheckBox();
+            ttsBox.Text = "Read aloud   (the voice sets the pace; the highlight follows it)";
+            ttsBox.SetBounds(14, 582, W - 28, 24);
+            ttsBox.CheckedChanged += delegate { ctl.SetTtsOn(ttsBox.Checked); UpdateReaderLabels(); };
+            Controls.Add(ttsBox);
+
+            Label voiceLabel = new Label();
+            voiceLabel.Text = "Voice:";
+            voiceLabel.SetBounds(14, 615, 110, 20);
+            Controls.Add(voiceLabel);
+            ttsVoice = new ComboBox();
+            ttsVoice.DropDownStyle = ComboBoxStyle.DropDownList;
+            ttsVoice.Items.AddRange(Controller.WindowsVoices());
+            ttsVoice.SetBounds(128, 611, W - 142, 24);
+            ttsVoice.SelectedIndexChanged += delegate { if (ttsVoice.SelectedItem != null) ctl.SetTtsVoice(ttsVoice.SelectedItem.ToString()); };
+            Controls.Add(ttsVoice);
+
+            volLabel = new Label();
+            volLabel.SetBounds(14, 645, W - 28, 20);
+            Controls.Add(volLabel);
+            ttsVol = new TrackBar();
+            ttsVol.Minimum = 0; ttsVol.Maximum = 20; ttsVol.TickFrequency = 2;   // steps of 5%
+            ttsVol.SmallChange = 1; ttsVol.LargeChange = 1;
+            ttsVol.SetBounds(10, 663, W - 20, 45);
+            ttsVol.ValueChanged += delegate { ctl.SetTtsVolume(ttsVol.Value * 5); volLabel.Text = "Voice volume: " + (ttsVol.Value * 5) + "%"; };
+            Controls.Add(ttsVol);
+
             // --- Hotkeys: their own window ---
-            Heading("Hotkeys", 222);
+            Heading("Hotkeys", 716);
             Label kHint = new Label();
             kHint.Text = "Set a hotkey for anything Word Focus can do.";
             kHint.ForeColor = SystemColors.GrayText;
-            kHint.SetBounds(14, 246, W - 130, 32);
+            kHint.SetBounds(14, 740, W - 130, 32);
             Controls.Add(kHint);
             Button keysBtn = new Button();
             keysBtn.Text = "Hotkeys...";
-            keysBtn.SetBounds(W - 104, 242, 90, 28);
+            keysBtn.SetBounds(W - 104, 736, 90, 28);
             keysBtn.Click += delegate { ctl.ShowHotkeys(); };
             Controls.Add(keysBtn);
 
-            ClientSize = new Size(W, 286);
+            // Fit the screen: if it's taller than the screen, the window scrolls.
+            AutoScroll = true;
+            int fullH = 780;
+            int maxH = Screen.PrimaryScreen.WorkingArea.Height - 80;
+            ClientSize = new Size(W + (fullH > maxH ? SystemInformation.VerticalScrollBarWidth : 0), Math.Min(fullH, maxH));
         }
 
-        private void UpdateFocusLabel() { fStrengthLabel.Text = "Focus area strength: " + (fStrength.Value * 10) + "%"; }
+        private void UpdateFocusLabel() { fStrengthLabel.Text = "Focus area strength: " + (fStrength.Value * 5) + "%"; }
+
+        private void UpdateReaderLabels()
+        {
+            rSpeedLabel.Text = (ttsBox != null && ttsBox.Checked ? "Reader / voice speed: " : "Reader speed: ") + (rSpeed.Value * 20) + " words per minute" +
+                               (ttsBox != null && ttsBox.Checked ? "  (approximate for the voice)" : "");
+            rWordsLabel.Text = "Words per step: " + rWords.Value;
+            rPauseLabel.Text = rPause.Value == 0 ? "Pause at , . ; : ? !   off"
+                : "Pause at , . ; : ? !   " + (rPause.Value / 10.0).ToString("0.0") + " seconds  (double at paragraph breaks)";
+        }
 
         public void SyncFromController()
         {
@@ -667,14 +820,307 @@ namespace WordFocus
             fHlRadio.Checked = ctl.FocusStyle == Controller.StyleHighlight;
             fUlRadio.Checked = ctl.FocusStyle == Controller.StyleUnderline;
             fBothRadio.Checked = ctl.FocusStyle == Controller.StyleBoth;
-            fStrength.Value = Math.Max(1, Math.Min(10, (ctl.FocusStrength + 5) / 10));
+            fStrength.Value = Math.Max(1, Math.Min(20, (ctl.FocusStrength + 2) / 5));
             UpdateFocusLabel();
+            rSpeed.Value = Math.Max(3, Math.Min(30, (ctl.ReaderWpm + 10) / 20));
+            rWords.Value = Math.Max(1, Math.Min(10, ctl.ReaderWords));
+            rHlRadio.Checked = ctl.ReaderStyle == Controller.StyleHighlight;
+            rUlRadio.Checked = ctl.ReaderStyle == Controller.StyleUnderline;
+            rBothRadio.Checked = ctl.ReaderStyle == Controller.StyleBoth;
+            rPause.Value = Math.Max(0, Math.Min(20, (ctl.ReaderPauseMs + 50) / 100));
+            rClick.SelectedIndex = ctl.ReaderClickMod;
+            ttsBox.Checked = ctl.TtsOn;
+            int vi = ttsVoice.Items.IndexOf(ctl.TtsVoice);
+            if (vi < 0 && ttsVoice.Items.Count > 0) vi = 0;
+            if (vi >= 0) ttsVoice.SelectedIndex = vi;
+            ttsVol.Value = Math.Max(0, Math.Min(20, (ctl.TtsVolume + 2) / 5));
+            volLabel.Text = "Voice volume: " + (ttsVol.Value * 5) + "%";
+            UpdateReaderLabels();
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
             base.OnFormClosing(e);
+        }
+    }
+
+    // ---- Reading speed test: follow the words with the mouse while reading; suggests a Reader speed ----
+    // Uses informational passages, so the speed matches reading to learn something new. They take turns.
+    public class SpeedTestForm : Form
+    {
+        private static readonly string[][] Passages = new string[][] {
+            new string[] { "A short history of cheese",
+            "Nobody knows exactly who made the first cheese, but people have been making it for a very long time. About sev" +
+            "en thousand years ago, farmers in what is now Poland used clay pots with tiny holes in them, and scientists ha" +
+            "ve found traces of milk fat inside. The holes worked like a strainer, letting the watery whey drain away while" +
+            " the solid curds stayed behind. That is still the basic idea of cheesemaking today. Milk is soured, or treated" +
+            " with rennet, an enzyme from the stomachs of young animals, so that it separates into curds and whey. The curd" +
+            "s are then pressed, salted, and often left to age, which is where most of the flavor comes from. In 2018, arch" +
+            "aeologists reported finding cheese in an Egyptian tomb that was about three thousand two hundred years old. La" +
+            "ter, the Romans spread cheesemaking across their empire, and monasteries in medieval Europe developed many of " +
+            "the varieties people still eat. In 1851, a farmer named Jesse Williams opened one of the first cheese factorie" +
+            "s in the United States, in Rome, New York, turning a farmhouse craft into an industry." },
+            new string[] { "The quadratic formula",
+            "A quadratic equation is any equation that can be written as a times x squared, plus b times x, plus c, equals " +
+            "zero, where a, b, and c are numbers and a is not zero. Equations like this appear whenever something follows a" +
+            " curve, such as the path of a thrown ball or the shape of a satellite dish. People were solving problems like " +
+            "these on clay tablets in ancient Babylon nearly four thousand years ago, long before modern algebra existed. T" +
+            "oday the quickest general method is the quadratic formula. It says that x equals negative b, plus or minus the" +
+            " square root of b squared minus four a c, all divided by two a. The part under the square root, b squared minu" +
+            "s four a c, is called the discriminant, and it tells you what kind of answers to expect. If it is positive, th" +
+            "ere are two real solutions. If it is zero, there is exactly one. If it is negative, there are no real solution" +
+            "s at all. For example, for x squared minus five x plus six equals zero, the formula gives x equals two or x eq" +
+            "uals three, and you can check that both of them work." },
+            new string[] { "Producers, consumers, and decomposers",
+            "Every ecosystem depends on three groups of living things working together: producers, consumers, and decompose" +
+            "rs. Producers make their own food. Plants, algae, and some bacteria capture energy from sunlight and use it to" +
+            " turn carbon dioxide and water into sugar, a process called photosynthesis. Because they build food from scrat" +
+            "ch, producers form the base of nearly every food chain. Consumers cannot make their own food, so they get ener" +
+            "gy by eating other living things. Herbivores, like rabbits and caterpillars, eat producers. Carnivores, like h" +
+            "awks and wolves, eat other animals, and omnivores, like bears and people, eat both. Decomposers take care of w" +
+            "hatever is left over. Fungi and many kinds of bacteria break down dead plants, dead animals, and waste, with h" +
+            "elp from small creatures like earthworms. As they work, they release nutrients such as nitrogen and phosphorus" +
+            " back into the soil, where producers can use them again. Without decomposers, dead material would pile up, and" +
+            " the nutrients locked inside it would never return. Together, these three groups keep energy flowing and matte" +
+            "r cycling through the living world." },
+            // A fourth passage (a short story by the author) goes here.
+        };
+
+        private class TextPanel : Panel
+        {
+            public TextPanel() { DoubleBuffered = true; ResizeRedraw = true; }
+        }
+
+        private readonly Controller ctl;
+        private readonly List<Control> introControls = new List<Control>();
+        private readonly List<Control> testControls = new List<Control>();
+        private int currentPassage;
+        private string[] words;
+        private RectangleF[] boxes;
+        private readonly TextPanel panel;
+        private readonly Label title, result;
+        private readonly Button useBtn, again, close, choose;
+        private readonly Font textFont;
+        private int startIdx = -1, maxIdx = -1, startTick, lastTick, suggested;
+        private bool finished;
+
+        public SpeedTestForm(Controller c)
+        {
+            ctl = c;
+            Text = "Word Focus - Reading speed test";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false; MinimizeBox = false;
+            StartPosition = FormStartPosition.CenterParent;
+            TopMost = true;
+            if (Controller.AppIcon != null) Icon = Controller.AppIcon;
+            ClientSize = new Size(820, 470);
+
+            // ---- First view: what the test is, and a choice of passage ----
+            Label intro = new Label();
+            intro.Font = new Font("Georgia", 12f);
+            intro.Text = "This is a reading speed test. Please follow along at the speed that lets you best focus on and " +
+                         "accurately read the information; this will help Word Focus help you best.\n\nPick a passage below and " +
+                         "read it, keeping the mouse pointer under the word you're on, as if following along with a finger. When " +
+                         "you reach the end, Word Focus suggests a Reader speed that matches you.";
+            Size introSz = TextRenderer.MeasureText(intro.Text, intro.Font, new Size(780, 2000), TextFormatFlags.WordBreak);
+            intro.SetBounds(20, 16, 780, introSz.Height + 8);
+            Controls.Add(intro); introControls.Add(intro);
+            Label pickLabel = new Label();
+            pickLabel.Text = "Choose a passage:";
+            pickLabel.Font = new Font(Font, FontStyle.Bold);
+            pickLabel.SetBounds(20, intro.Bottom + 12, 300, 20);
+            Controls.Add(pickLabel); introControls.Add(pickLabel);
+            int by = pickLabel.Bottom + 6;
+            for (int i = 0; i < Passages.Length; i++)
+            {
+                Button b = new Button();
+                b.Text = Passages[i][0];
+                b.SetBounds(20, by, 360, 30);
+                int which = i;
+                b.Click += delegate { ShowTest(which); };
+                Controls.Add(b); introControls.Add(b);
+                by += 36;
+            }
+            introHeight = by + 50;
+            Button introClose = new Button();
+            introClose.Text = "Close";
+            introClose.SetBounds(706, by + 10, 100, 28);
+            introClose.Click += delegate { Close(); };
+            Controls.Add(introClose); introControls.Add(introClose);
+
+            // ---- Second view: the test ----
+            Label how = new Label();
+            how.Text = "Keep the mouse pointer under the word you're on. Timing starts at the first words and stops at the last one.";
+            how.SetBounds(14, 10, 792, 36);
+            Controls.Add(how); testControls.Add(how);
+
+            title = new Label();
+            title.Font = new Font(Font, FontStyle.Bold);
+            title.SetBounds(14, 48, 792, 20);
+            Controls.Add(title); testControls.Add(title);
+
+            textFont = new Font("Georgia", 13f);
+            panel = new TextPanel();
+            panel.BackColor = Color.White;
+            panel.SetBounds(14, 72, 792, 330);
+            panel.Paint += PaintText;
+            panel.MouseMove += Track;
+            Controls.Add(panel); testControls.Add(panel);
+
+            result = new Label();
+            Controls.Add(result); testControls.Add(result);
+
+            useBtn = new Button();
+            useBtn.Text = "Use this speed";
+            useBtn.Enabled = false;
+            useBtn.Click += delegate { ctl.SetReaderWpm(suggested); Close(); };
+            Controls.Add(useBtn); testControls.Add(useBtn);
+
+            again = new Button();
+            again.Text = "Try again";
+            again.Click += delegate { LoadPassage(currentPassage); };
+            Controls.Add(again); testControls.Add(again);
+
+            choose = new Button();
+            choose.Text = "Choose another passage";
+            choose.Click += delegate { ShowIntro(); };
+            Controls.Add(choose); testControls.Add(choose);
+
+            close = new Button();
+            close.Text = "Close";
+            close.Click += delegate { Close(); };
+            Controls.Add(close); testControls.Add(close);
+
+            ShowIntro();
+        }
+
+        private int introHeight;
+
+        private void ShowIntro()
+        {
+            foreach (Control c in testControls) c.Visible = false;
+            foreach (Control c in introControls) c.Visible = true;
+            ClientSize = new Size(820, introHeight);
+        }
+
+        private void ShowTest(int which)
+        {
+            foreach (Control c in introControls) c.Visible = false;
+            foreach (Control c in testControls) c.Visible = true;
+            LoadPassage(which);
+        }
+
+        // Shows the next passage, sized to fit (fonts can be larger on high-DPI screens).
+        private void LoadPassage(int which)
+        {
+            currentPassage = which;
+            string[] pick = Passages[which];
+            title.Text = pick[0];
+            words = pick[1].Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            boxes = new RectangleF[words.Length];
+            LayoutWords();
+            panel.Height = (int)Math.Ceiling(boxes[boxes.Length - 1].Bottom) + 16;
+            int y = panel.Bottom + 10;
+            result.SetBounds(14, y, 792, 36);
+            useBtn.SetBounds(14, y + 40, 130, 28);
+            again.SetBounds(152, y + 40, 100, 28);
+            choose.SetBounds(260, y + 40, 170, 28);
+            close.SetBounds(706, y + 40, 100, 28);
+            ClientSize = new Size(820, y + 80);
+            startIdx = -1; maxIdx = -1; finished = false;
+            useBtn.Enabled = false;
+            result.Text = "Move the pointer to the first word to begin.";
+            panel.Invalidate();
+        }
+
+        // Lays the words out in wrapped lines and remembers where each one is.
+        private void LayoutWords()
+        {
+            float x = 12, y = 12, lineH = TextRenderer.MeasureText("Ag", textFont).Height + 8;
+            float maxW = panel.ClientSize.Width - 12;
+            float space = TextRenderer.MeasureText("a a", textFont).Width - TextRenderer.MeasureText("aa", textFont).Width;
+            for (int i = 0; i < words.Length; i++)
+            {
+                Size sz = TextRenderer.MeasureText(words[i], textFont, new Size(1000, 100), TextFormatFlags.NoPadding);
+                if (x + sz.Width > maxW && x > 12) { x = 12; y += lineH; }
+                boxes[i] = new RectangleF(x, y, sz.Width, lineH - 4);
+                x += sz.Width + Math.Max(4, space);
+            }
+        }
+
+        private void PaintText(object sender, PaintEventArgs e)
+        {
+            if (words == null) return;
+            Color rc = ctl.ReaderColor;
+            using (SolidBrush done = new SolidBrush(Color.FromArgb(90, rc)))
+            {
+                for (int i = 0; i < words.Length; i++)
+                {
+                    if (startIdx >= 0 && i >= startIdx && i <= maxIdx)
+                    {
+                        RectangleF b = boxes[i]; b.Inflate(3, 1);
+                        e.Graphics.FillRectangle(done, b);
+                    }
+                    TextRenderer.DrawText(e.Graphics, words[i], textFont, Point.Round(boxes[i].Location), Color.Black, TextFormatFlags.NoPadding);
+                }
+            }
+        }
+
+        private int WordAt(Point p)
+        {
+            for (int i = 0; i < boxes.Length; i++)
+            {
+                RectangleF b = boxes[i]; b.Inflate(4, 6); // a little forgiving: just under the word counts too
+                if (b.Contains(p)) return i;
+            }
+            return -1;
+        }
+
+        private void Track(object sender, MouseEventArgs e)
+        {
+            if (finished || words == null) return;
+            int i = WordAt(e.Location);
+            if (i < 0) return;
+            int now = Environment.TickCount;
+            if (startIdx < 0)
+            {
+                if (i > 2) return;                          // start at the beginning of the passage
+                startIdx = i; maxIdx = i; startTick = now; lastTick = now;
+                result.Text = "Reading... keep the pointer under the words.";
+                panel.Invalidate();
+                return;
+            }
+            if (i > maxIdx && i <= maxIdx + 15)            // moving forward (ignore big jumps ahead)
+            {
+                maxIdx = i; lastTick = now;
+                panel.Invalidate();
+                if (maxIdx >= words.Length - 1) Finish();
+            }
+        }
+
+        private void Finish()
+        {
+            finished = true;
+            int n = maxIdx - startIdx + 1;
+            int ms = unchecked(lastTick - startTick);
+            if (n < 30 || ms < 3000)
+            {
+                result.Text = "That was too quick to measure. Click Try again and read at your normal pace.";
+                return;
+            }
+            int wpm = (int)Math.Round(n * 60000.0 / ms);
+            suggested = Math.Max(60, Math.Min(600, (int)Math.Round(wpm / 20.0) * 20));
+            result.Text = "You read about " + wpm + " words per minute. Suggested Reader speed: " + suggested + " words per minute" +
+                          (wpm > 600 ? " (the Reader's top speed)." : wpm < 60 ? " (the Reader's slowest speed)." : ".") +
+                          "";
+            useBtn.Enabled = true;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) textFont.Dispose();
+            base.Dispose(disposing);
         }
     }
 
@@ -884,7 +1330,7 @@ namespace WordFocus
         public int FocusStyle { get { return focusStyle; } }
         public int FocusStrength { get { return focusStrength; } }
         public void SetFocusStyle(int v) { focusStyle = Math.Max(0, Math.Min(2, v)); focusDirty = true; settingsChanged = true; }
-        public void SetFocusStrength(int v) { focusStrength = Math.Max(10, Math.Min(100, v)); focusDirty = true; settingsChanged = true; }
+        public void SetFocusStrength(int v) { focusStrength = Math.Max(5, Math.Min(100, v)); focusDirty = true; settingsChanged = true; }
 
         private static readonly uint MyPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
         private Overlay focusOverlay;
@@ -899,6 +1345,65 @@ namespace WordFocus
         private int focusRefreshTick = 0;
         private int focusSlowPenalty = 0;
         private string lastPagePos = "";
+
+        // ---- Word Focus Reader: a chunk of words moving through the Focus area ----
+        public const int ReaderNone = 0, ReaderStartAt = 1, ReaderStop = 2, ReaderClick = 3;
+        private volatile int readerWpm = 200;          // words per minute
+        private volatile int readerWords = 3;          // words per step
+        private volatile int readerClickMod = 1;
+        private volatile int readerStyle = StyleHighlight;
+        private Color readerColor = Color.FromArgb(255, 214, 0);
+        public int ReaderStyle { get { return readerStyle; } }
+        public Color ReaderColor { get { return readerColor; } }
+        public void SetReaderStyle(int v) { readerStyle = Math.Max(0, Math.Min(2, v)); settingsChanged = true; readerRedraw = true; }
+        public void SetReaderColor(Color c) { readerColor = Color.FromArgb(255, c.R, c.G, c.B); settingsChanged = true; readerRedraw = true; }
+        private volatile bool readerRedraw = false;   // style/color changed: redraw the current step
+        private volatile int readerPauseMs = 500;      // extra wait after , . ; : ? !  (0 = off)
+        public int ReaderPauseMs { get { return readerPauseMs; } }
+        public void SetReaderPauseMs(int v) { readerPauseMs = Math.Max(0, Math.Min(2000, v)); settingsChanged = true; }       // 0 = off, 1 = Ctrl, 2 = Alt, 3 = Shift  (+ click starts / jumps)
+        public int ReaderWpm { get { return readerWpm; } }
+        public int ReaderWords { get { return readerWords; } }
+        public int ReaderClickMod { get { return readerClickMod; } }
+        public void SetReaderWpm(int v) { readerWpm = Math.Max(60, Math.Min(600, v)); settingsChanged = true; }
+        public void SetReaderWords(int v) { readerWords = Math.Max(1, Math.Min(10, v)); settingsChanged = true; }
+        public void SetReaderClickMod(int v) { readerClickMod = Math.Max(0, Math.Min(3, v)); settingsChanged = true; }
+
+        private volatile int readerRequest = ReaderNone;  // set on the UI thread, handled by the focus worker
+        private Native.POINT readerRequestPt;
+        private volatile bool readerActive = false;       // a Reader session exists (playing or paused)
+        private volatile bool readerPaused = false;
+        private Overlay readerOverlay;
+        // Focus worker only:
+        private TextPattern focusTp;                      // the text source the Focus area's ranges belong to
+        private TextPatternRange readerChunk;             // the words lit right now
+        private TextPatternRange readerNext;              // where the next step starts (null = end of the area)
+        private int readerNextTick;
+
+        // Hotkey "Reader: start at word under mouse": if no Focus area is on yet, light up the paragraph first.
+        private void RequestReaderStart()
+        {
+            Native.POINT p;
+            Native.GetCursorPos(out p);
+            if (focusKind == FocusNone) { focusRequestPt = p; focusRequest = FocusParagraph; }
+            readerRequestPt = p;
+            readerRequest = ReaderStartAt;
+        }
+
+        public void ReaderPauseToggle()
+        {
+            if (!readerActive) return;
+            SetReaderPaused(!readerPaused);
+        }
+
+        // Safe from any thread. Also pauses / resumes the voice.
+        private void SetReaderPaused(bool p)
+        {
+            readerPaused = p;
+            if (!p) readerNextTick = Environment.TickCount; // resume right away
+            if (ttsSpeaking) UiInvoke(delegate { TtsUiPause(p); });
+        }
+
+        private void UiInvoke(Action a) { try { overlay.BeginInvoke(a); } catch { } }
 
         // Same hotkey again (or the other focus hotkey on the same kind) turns it off; otherwise start/switch.
         private void RequestFocus(int kind)
@@ -919,12 +1424,15 @@ namespace WordFocus
             "toggle", "settings", "more", "fewer", "nextstyle", "ombre", "overlap",
             "stronger", "weaker", "nextcolor", "prevcolor", "pointermore", "pointerless",
             "paragraph", "page", "fstronger", "fweaker",
+            "readerstart", "readerpause", "readerstop", "readerfaster", "readerslower", "readermore", "readerfewer", "readaloud",
             "advanced", "hotkeys", "startup", "exit" };
         public static readonly string[] KeyNames = new string[] {
             "Highlight on/off", "Open settings", "More words", "Fewer words", "Next style (highlight / underline / both)",
             "Ombre on/off", "Overlap lines on/off", "Highlight stronger", "Highlight weaker", "Next color", "Previous color",
             "Mouse pointer more visible", "Mouse pointer less visible",
             "Paragraph Focus on/off", "Page Focus on/off", "Focus layer stronger", "Focus layer weaker",
+            "Reader: start at word under mouse", "Reader: pause / resume", "Reader: stop", "Reader: faster", "Reader: slower",
+            "Reader: more words per step", "Reader: fewer words per step", "Reader: read aloud on/off",
             "Open advanced settings", "Open hotkeys menu", "Start with Windows on/off", "Exit Word Focus" };
         public static int KeyIndex(string id) { return Array.IndexOf(KeyIds, id); }
         // Defaults: Ctrl+Alt+H and Ctrl+Alt+K. Word-count keys are off until set in Settings > Advanced.
@@ -1142,6 +1650,8 @@ namespace WordFocus
 
             focusOverlay = new Overlay();   // created first, so the hover highlight sits on top of it
             focusOverlay.Show();
+            readerOverlay = new Overlay();  // the Reader's moving chunk: above the Focus layer, below the hover
+            readerOverlay.Show();
             overlay = new Overlay();
             overlay.Show();
             Clear();
@@ -1151,6 +1661,7 @@ namespace WordFocus
             restoreTimer.Interval = 150;
             restoreTimer.Tick += delegate
             {
+                try { UpdateReaderHooks(); } catch { }
                 if (fader != null && fader.IsFaded &&
                     (!enabled || unchecked(Environment.TickCount - lastHitTick) > CursorRestoreDelayMs))
                     RestoreCursor();
@@ -1232,6 +1743,7 @@ namespace WordFocus
 
         private void OnHotkey(int id)
         {
+            if (id == 60) { ReaderPauseToggle(); return; } // keyboard Play/Pause key, while the Reader runs
             if (id < 1 || id > KeyIds.Length) return;
             switch (KeyIds[id - 1])
             {
@@ -1242,16 +1754,24 @@ namespace WordFocus
                 case "nextstyle": SetStyle((style + 1) % 3); break;
                 case "ombre": SetOmbre(!ombre); break;
                 case "overlap": SetOverlapLines(!overlapLines); break;
-                case "stronger": SetStrength(strengthPercent + 10); break;
-                case "weaker": SetStrength(strengthPercent - 10); break;
+                case "stronger": SetStrength(strengthPercent + 5); break;
+                case "weaker": SetStrength(strengthPercent - 5); break;
                 case "nextcolor": StepColor(1); break;
                 case "prevcolor": StepColor(-1); break;
-                case "pointermore": SetCursorPercent(cursorPercent + 10); break;
-                case "pointerless": SetCursorPercent(cursorPercent - 10); break;
+                case "pointermore": SetCursorPercent(cursorPercent + 5); break;
+                case "pointerless": SetCursorPercent(cursorPercent - 5); break;
                 case "paragraph": RequestFocus(FocusParagraph); return;
                 case "page": RequestFocus(FocusPage); return;
-                case "fstronger": SetFocusStrength(focusStrength + 10); break;
-                case "fweaker": SetFocusStrength(focusStrength - 10); break;
+                case "fstronger": SetFocusStrength(focusStrength + 5); break;
+                case "fweaker": SetFocusStrength(focusStrength - 5); break;
+                case "readerstart": RequestReaderStart(); return;
+                case "readerpause": ReaderPauseToggle(); return;
+                case "readerstop": readerRequest = ReaderStop; return;
+                case "readerfaster": SetReaderWpm(readerWpm + 20); break;
+                case "readerslower": SetReaderWpm(readerWpm - 20); break;
+                case "readermore": SetReaderWords(readerWords + 1); break;
+                case "readerfewer": SetReaderWords(readerWords - 1); break;
+                case "readaloud": SetTtsOn(!ttsOn); break;
                 case "advanced": ShowAdvanced(); return;
                 case "hotkeys": ShowHotkeys(); return;
                 case "startup": ToggleStartup(); break;
@@ -1272,7 +1792,7 @@ namespace WordFocus
 
         public void SetCount(int v) { count = Math.Max(1, Math.Min(MaxCountValue, v)); dirty = true; settingsChanged = true; }
         public void SetOmbre(bool v) { ombre = v; dirty = true; settingsChanged = true; }
-        public void SetStrength(int percent) { strengthPercent = Math.Max(10, Math.Min(100, percent)); dirty = true; settingsChanged = true; }
+        public void SetStrength(int percent) { strengthPercent = Math.Max(5, Math.Min(100, percent)); dirty = true; settingsChanged = true; }
         public int StrengthPercent { get { return strengthPercent; } }
         public void SetColor(Color c) { HighlightColor = Color.FromArgb(255, c.R, c.G, c.B); dirty = true; focusDirty = true; settingsChanged = true; }
 
@@ -1307,10 +1827,20 @@ namespace WordFocus
                     }
                     else if (k == "overlap") overlapLines = v == "1";
                     else if (k == "pointer" && int.TryParse(v, out n)) cursorPercent = Math.Max(0, Math.Min(100, n));
-                    else if (k == "strength" && int.TryParse(v, out n)) strengthPercent = Math.Max(10, Math.Min(100, n));
+                    else if (k == "strength" && int.TryParse(v, out n)) strengthPercent = Math.Max(5, Math.Min(100, n));
                     else if (k == "ombre") ombre = v == "1";
                     else if (k == "fstyle" && int.TryParse(v, out n)) focusStyle = Math.Max(0, Math.Min(2, n));
-                    else if (k == "fstrength" && int.TryParse(v, out n)) focusStrength = Math.Max(10, Math.Min(100, n));
+                    else if (k == "fstrength" && int.TryParse(v, out n)) focusStrength = Math.Max(5, Math.Min(100, n));
+                    else if (k == "rwpm" && int.TryParse(v, out n)) readerWpm = Math.Max(60, Math.Min(600, n));
+                    else if (k == "rwords" && int.TryParse(v, out n)) readerWords = Math.Max(1, Math.Min(10, n));
+                    else if (k == "tts") ttsOn = v == "1";
+                    else if (k == "ttsvoice") ttsVoice = v;
+                    else if (k == "ttsvol" && int.TryParse(v, out n)) ttsVolume = Math.Max(0, Math.Min(100, n));
+                    else if (k == "rstyle" && int.TryParse(v, out n)) readerStyle = Math.Max(0, Math.Min(2, n));
+                    else if (k == "rcolor" && v.Length == 6 && int.TryParse(v, System.Globalization.NumberStyles.HexNumber, null, out n))
+                        readerColor = Color.FromArgb(255, (n >> 16) & 255, (n >> 8) & 255, n & 255);
+                    else if (k == "rpause" && int.TryParse(v, out n)) readerPauseMs = Math.Max(0, Math.Min(2000, n));
+                    else if (k == "rclick" && int.TryParse(v, out n)) readerClickMod = Math.Max(0, Math.Min(3, n));
                     else if (k == "style") style = v == "underline" ? StyleUnderline : v == "both" ? StyleBoth : StyleHighlight;
                     else if (k.StartsWith("noteok.")) dismissedNotes[k.Substring(7)] = v;
                     else if (k.StartsWith("key"))
@@ -1355,7 +1885,16 @@ namespace WordFocus
                     "color=" + c.R.ToString("X2") + c.G.ToString("X2") + c.B.ToString("X2"),
                     "style=" + (style == StyleUnderline ? "underline" : style == StyleBoth ? "both" : "highlight"),
                     "fstyle=" + focusStyle,
-                    "fstrength=" + focusStrength
+                    "fstrength=" + focusStrength,
+                    "rwpm=" + readerWpm,
+                    "rwords=" + readerWords,
+                    "rclick=" + readerClickMod,
+                    "rpause=" + readerPauseMs,
+                    "rstyle=" + readerStyle,
+                    "rcolor=" + readerColor.R.ToString("X2") + readerColor.G.ToString("X2") + readerColor.B.ToString("X2"),
+                    "tts=" + (ttsOn ? "1" : "0"),
+                    "ttsvoice=" + ttsVoice,
+                    "ttsvol=" + ttsVolume
                 };
                 List<string> all = new List<string>(lines);
                 for (int i = 0; i < KeyIds.Length; i++) all.Add("key." + KeyIds[i] + "=" + keyMods[i] + "," + keyVk[i]);
@@ -1383,6 +1922,9 @@ namespace WordFocus
             if (settingsChanged) SaveSettings();
             RestoreCursor();
             UnregisterAll();
+            if (mouseHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
+            TtsUiStop();
+            if (mediaKeyState == 1) Native.UnregisterHotKey(hotkeys.Handle, 60);
             hotkeys.Dispose();
             tray.Visible = false;
             tray.Dispose();
@@ -1430,6 +1972,7 @@ namespace WordFocus
                 if (req == FocusClear) ClearFocusWorker();
                 else StartFocusWorker(req, focusRequestPt);
             }
+            ReaderStep();
             if (focusRanges == null) return;
             // Check ~7x a second (the work per check is small and capped). If the app is slow to answer, wait longer.
             int interval = 140 + focusSlowPenalty;
@@ -1480,6 +2023,7 @@ namespace WordFocus
             if (sig == focusSig && !focusDirty) return; // nothing moved
             focusSig = sig;
             focusDirty = false;
+            if (readerActive && readerChunk != null) ShowReaderChunk();
             System.Windows.Rect[] result = rects;
             try { focusOverlay.BeginInvoke(new Action(delegate { RenderFocus(result); })); } catch { }
         }
@@ -1502,8 +2046,421 @@ namespace WordFocus
             return keep.ToArray();
         }
 
+        // ---- Reader (focus worker thread) ----
+        private void ReaderStep()
+        {
+            int rq = readerRequest;
+            if (rq != ReaderNone)
+            {
+                readerRequest = ReaderNone;
+                if (rq == ReaderStop) StopReaderWorker();
+                else if (rq == ReaderStartAt && focusRanges != null) StartReaderAt(readerRequestPt);
+                else if (rq == ReaderClick && focusRanges != null)
+                {
+                    // Click cycle: start here -> pause -> start at the new spot -> pause -> ...
+                    if (readerActive && !readerPaused) SetReaderPaused(true);
+                    else StartReaderAt(readerRequestPt);
+                }
+            }
+            if (readerRedraw && readerActive && readerChunk != null) { readerRedraw = false; ShowReaderChunk(); }
+            // Read aloud switched on/off while reading: carry on from the current words in the new mode.
+            if (readerActive && readerChunk != null && ttsOn != ttsWasOn)
+            {
+                ttsWasOn = ttsOn;
+                TextPatternRange here = readerChunk.Clone();
+                here.MoveEndpointByRange(TextPatternRangeEndpoint.End, readerChunk, TextPatternRangeEndpoint.Start);
+                here.ExpandToEnclosingUnit(TextUnit.Word);
+                if (ttsOn) { TtsSpeakFrom(here); if (readerPaused) UiInvoke(delegate { TtsUiPause(true); }); }
+                else { TtsStopWorker(); TextPatternRange nx; BuildChunk(here, out nx); readerNext = nx; readerNextTick = Environment.TickCount; }
+            }
+            ttsWasOn = ttsOn;
+            if (readerActive && ttsSpeaking) { TtsStep(); return; }   // the voice sets the pace
+            if (!readerActive || readerPaused || readerChunk == null) return;
+            if (unchecked(Environment.TickCount - readerNextTick) < 0) return;
+            AdvanceReader();
+        }
+
+        // ==================== Read aloud ====================
+        // Worker side: speaks one paragraph at a time; the highlight follows the voice's position.
+        private volatile bool ttsSpeaking = false;     // a voice session is running for the Reader
+        private bool ttsWasOn = false;
+        private int ttsGenCounter = 0;
+        private volatile int ttsActiveGen = 0;         // which paragraph we're waiting on
+        private volatile int ttsPos = -1, ttsPosGen = -1, ttsDoneGen = -1; // set by the UI thread
+        private TextPatternRange ttsSeg, ttsCursor;    // worker only
+        private int ttsCursorPos;
+        private bool ttsGap;
+        private int ttsGapUntil;
+
+        private TextPatternRange RunOf(TextPatternRange w)
+        {
+            if (focusRanges == null) return null;
+            foreach (TextPatternRange run in focusRanges)
+            {
+                try
+                {
+                    if (w.CompareEndpoints(TextPatternRangeEndpoint.Start, run, TextPatternRangeEndpoint.Start) >= 0 &&
+                        w.CompareEndpoints(TextPatternRangeEndpoint.Start, run, TextPatternRangeEndpoint.End) < 0) return run;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        // Speak from word 'w' to the end of its paragraph (staying inside the Focus area).
+        private void TtsSpeakFrom(TextPatternRange w)
+        {
+            w = NextInFocus(w);
+            if (w == null) { StopReaderWorker(); return; }
+            TextPatternRange seg = w.Clone();
+            TextPatternRange para = ParagraphOf(w);
+            if (para != null) seg.MoveEndpointByRange(TextPatternRangeEndpoint.End, para, TextPatternRangeEndpoint.End);
+            TextPatternRange run = RunOf(w);
+            if (run != null && seg.CompareEndpoints(TextPatternRangeEndpoint.End, run, TextPatternRangeEndpoint.End) > 0)
+                seg.MoveEndpointByRange(TextPatternRangeEndpoint.End, run, TextPatternRangeEndpoint.End);
+            string text = seg.GetText(5000);
+            ttsSeg = seg;
+            ttsCursor = seg.Clone();
+            ttsCursor.MoveEndpointByRange(TextPatternRangeEndpoint.End, seg, TextPatternRangeEndpoint.Start);
+            ttsCursorPos = 0;
+            ttsGap = false;
+            int gen = ++ttsGenCounter;
+            ttsActiveGen = gen;
+            ttsSpeaking = true;
+            TextPatternRange nx;
+            TextPatternRange chunk = BuildChunk(w, out nx);
+            if (chunk != null) { readerChunk = chunk; ShowReaderChunk(); }
+            if (string.IsNullOrEmpty(text) || !HasWordChar(text)) { ttsDoneGen = gen; return; } // nothing to say: move on
+            string say = text;
+            UiInvoke(delegate { TtsUiSpeak(say, gen); });
+        }
+
+        private void TtsStopWorker()
+        {
+            if (!ttsSpeaking) return;
+            ttsSpeaking = false;
+            ttsActiveGen = ++ttsGenCounter; // makes any late progress messages ignored
+            UiInvoke(delegate { TtsUiStop(); });
+        }
+
+        private void TtsStep()
+        {
+            int gen = ttsActiveGen;
+            // Follow the voice: move the highlight to the word being spoken.
+            int pos = ttsPos;
+            if (ttsPosGen == gen && pos >= 0 && pos != ttsCursorPos && ttsCursor != null)
+            {
+                try
+                {
+                    ttsCursor.Move(TextUnit.Character, pos - ttsCursorPos);
+                    ttsCursorPos = pos;
+                    TextPatternRange word = ttsCursor.Clone();
+                    word.ExpandToEnclosingUnit(TextUnit.Word);
+                    TextPatternRange nx;
+                    TextPatternRange chunk = BuildChunk(word, out nx);
+                    if (chunk != null) { readerChunk = chunk; ShowReaderChunk(); }
+                }
+                catch { }
+            }
+            if (readerPaused) return;
+            // Paragraph finished: wait (double the punctuation pause), then the next paragraph.
+            if (ttsDoneGen == gen && !ttsGap) { ttsGap = true; ttsGapUntil = Environment.TickCount + readerPauseMs * 2; }
+            if (ttsGap && unchecked(Environment.TickCount - ttsGapUntil) >= 0)
+            {
+                ttsGap = false;
+                TextPatternRange after = ttsSeg.Clone();
+                after.MoveEndpointByRange(TextPatternRangeEndpoint.Start, ttsSeg, TextPatternRangeEndpoint.End);
+                TextPatternRange nextWord = null;
+                for (int k = 0; k < 6; k++)
+                {
+                    if (after.Move(TextUnit.Word, 1) == 0) { nextWord = null; break; }
+                    TextPatternRange cand = after.Clone();
+                    cand.ExpandToEnclosingUnit(TextUnit.Word);
+                    if (cand.CompareEndpoints(TextPatternRangeEndpoint.Start, ttsSeg, TextPatternRangeEndpoint.End) >= 0 &&
+                        HasWordChar(cand.GetText(60))) { nextWord = cand; break; }
+                }
+                if (nextWord == null) { Log.Write("Reader: read aloud reached the end"); StopReaderWorker(); return; }
+                TtsSpeakFrom(nextWord);
+            }
+        }
+
+        // ---- UI side: the voices themselves ----
+        private SpeechSynthesizer synth;
+        private Prompt synthPrompt;
+        private int synthGen;
+
+        public static string[] WindowsVoices()
+        {
+            List<string> names = new List<string>();
+            try
+            {
+                using (SpeechSynthesizer s = new SpeechSynthesizer())
+                    foreach (InstalledVoice v in s.GetInstalledVoices())
+                        if (v.Enabled) names.Add(v.VoiceInfo.Name);
+            }
+            catch { }
+            return names.ToArray();
+        }
+
+        // Words per minute -> Windows voice rate (-10..10). Rate 0 is roughly 200 words per minute.
+        private int VoiceRate() { return Math.Max(-10, Math.Min(10, (int)Math.Round((readerWpm - 200) / 25.0))); }
+
+        private void TtsUiSpeak(string text, int gen)
+        {
+            TtsUiStop();
+            try
+            {
+                if (synth == null)
+                {
+                    synth = new SpeechSynthesizer();
+                    synth.SetOutputToDefaultAudioDevice();
+                    synth.SpeakProgress += delegate(object o, SpeakProgressEventArgs e)
+                    {
+                        if (e.Prompt == synthPrompt) { ttsPos = e.CharacterPosition; ttsPosGen = synthGen; }
+                    };
+                    synth.SpeakCompleted += delegate(object o, SpeakCompletedEventArgs e)
+                    {
+                        if (e.Prompt == synthPrompt && !e.Cancelled) ttsDoneGen = synthGen;
+                    };
+                }
+                if (synth.State == SynthesizerState.Paused) synth.Resume();
+                if (!string.IsNullOrEmpty(ttsVoice)) { try { synth.SelectVoice(ttsVoice); } catch { } }
+                synth.Rate = VoiceRate();
+                synth.Volume = ttsVolume;
+                synthGen = gen;
+                synthPrompt = synth.SpeakAsync(text);
+            }
+            catch (Exception ex) { Log.Write("Voice ERROR " + ex.Message); ttsDoneGen = gen; }
+        }
+
+        private void TtsUiStop()
+        {
+            try
+            {
+                if (synth != null)
+                {
+                    synthPrompt = null;
+                    if (synth.State == SynthesizerState.Paused) synth.Resume();
+                    synth.SpeakAsyncCancelAll();
+                }
+            }
+            catch { }
+        }
+
+        private void TtsUiPause(bool pause)
+        {
+            try
+            {
+                if (synth != null && synthPrompt != null)
+                {
+                    if (pause && synth.State == SynthesizerState.Speaking) synth.Pause();
+                    else if (!pause && synth.State == SynthesizerState.Paused) synth.Resume();
+                }
+            }
+            catch { }
+        }
+
+        // ---- Read aloud settings ----
+        private volatile bool ttsOn = false;
+        private string ttsVoice = "";
+        private volatile int ttsVolume = 100;
+        public bool TtsOn { get { return ttsOn; } }
+        public string TtsVoice { get { return ttsVoice; } }
+        public int TtsVolume { get { return ttsVolume; } }
+        public void SetTtsOn(bool v) { ttsOn = v; settingsChanged = true; }
+        public void SetTtsVoice(string v) { ttsVoice = v ?? ""; settingsChanged = true; }
+        public void SetTtsVolume(int v) { ttsVolume = Math.Max(0, Math.Min(100, v)); settingsChanged = true; try { if (synth != null) synth.Volume = ttsVolume; } catch { } }
+
+        private bool InFocus(TextPatternRange r)
+        {
+            if (focusRanges == null) return false;
+            foreach (TextPatternRange run in focusRanges)
+            {
+                try
+                {
+                    if (r.CompareEndpoints(TextPatternRangeEndpoint.Start, run, TextPatternRangeEndpoint.Start) >= 0 &&
+                        r.CompareEndpoints(TextPatternRangeEndpoint.Start, run, TextPatternRangeEndpoint.End) < 0) return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        // If 'w' is outside the Focus area, jump to the start of the next part of the area after it (e.g. past a skipped
+        // heading on a page). Returns null when there is nothing left.
+        private TextPatternRange NextInFocus(TextPatternRange w)
+        {
+            if (w == null) return null;
+            if (InFocus(w)) return w;
+            foreach (TextPatternRange run in focusRanges)
+            {
+                try
+                {
+                    if (run.CompareEndpoints(TextPatternRangeEndpoint.Start, w, TextPatternRangeEndpoint.Start) > 0)
+                    {
+                        TextPatternRange s0 = run.Clone();
+                        s0.MoveEndpointByRange(TextPatternRangeEndpoint.End, run, TextPatternRangeEndpoint.Start);
+                        s0.ExpandToEnclosingUnit(TextUnit.Word);
+                        return s0;
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        // Collects the next 'readerWords' real words from 'start' (staying inside the area). Sets 'next' to where the
+        // following step begins. Returns null if there are no words left.
+        private TextPatternRange BuildChunk(TextPatternRange start, out TextPatternRange next)
+        {
+            next = null;
+            lastChunkPunct = false;
+            lastChunkPara = false;
+            TextPatternRange w = NextInFocus(start);
+            TextPatternRange chunk = null;
+            TextPatternRange chunkPara = null;   // the paragraph this step is in
+            int got = 0, want = readerWords;
+            for (int guard = 0; w != null && got < want && guard < 200; guard++)
+            {
+                if (!InFocus(w)) { if (chunk != null) break; w = NextInFocus(w); if (w == null) break; } // the chunk ends at a gap
+                string text = w.GetText(60);
+                bool stopHere = false;
+                if (HasWordChar(text))
+                {
+                    // A step never runs across a paragraph break: stop here and pause twice as long.
+                    if (chunk != null && readerPauseMs > 0 && !SameParagraph(chunkPara, w)) { lastChunkPara = true; break; }
+                    if (chunk == null) { chunk = w.Clone(); chunkPara = ParagraphOf(w); }
+                    else chunk.MoveEndpointByRange(TextPatternRangeEndpoint.End, w, TextPatternRangeEndpoint.End);
+                    got++;
+                    if (readerPauseMs > 0 && EndsPhrase(text)) stopHere = true; // end this step at the punctuation
+                }
+                else if (chunk != null && readerPauseMs > 0 && EndsPhrase(text)) stopHere = true; // punctuation as its own "word"
+                TextPatternRange m = w.Clone();
+                if (m.Move(TextUnit.Word, 1) == 0) { w = null; lastChunkPunct = stopHere; break; }
+                m.ExpandToEnclosingUnit(TextUnit.Word);
+                w = m;
+                if (stopHere) { lastChunkPunct = true; break; }
+            }
+            // If the step filled up right before a separate punctuation mark (some apps treat "," as its own word),
+            // still pause, and start the next step after the mark.
+            if (!lastChunkPunct && chunk != null && w != null && readerPauseMs > 0)
+            {
+                string t = w.GetText(60);
+                if (!HasWordChar(t) && EndsPhrase(t))
+                {
+                    lastChunkPunct = true;
+                    TextPatternRange m = w.Clone();
+                    if (m.Move(TextUnit.Word, 1) == 0) w = null;
+                    else { m.ExpandToEnclosingUnit(TextUnit.Word); w = m; }
+                }
+            }
+            // Does the next step start a new paragraph? Then this pause is doubled.
+            if (!lastChunkPara && chunk != null && w != null && readerPauseMs > 0)
+            {
+                TextPatternRange n2 = w;
+                for (int k = 0; k < 4 && n2 != null && !HasWordChar(n2.GetText(60)); k++) // skip stray punctuation/spaces
+                {
+                    TextPatternRange m = n2.Clone();
+                    if (m.Move(TextUnit.Word, 1) == 0) { n2 = null; break; }
+                    m.ExpandToEnclosingUnit(TextUnit.Word);
+                    n2 = m;
+                }
+                if (n2 != null && !SameParagraph(chunkPara, n2)) lastChunkPara = true;
+            }
+            lastChunkWords = Math.Max(1, got);
+            next = w;
+            return chunk;
+        }
+
+        private static TextPatternRange ParagraphOf(TextPatternRange r)
+        {
+            try { TextPatternRange p = r.Clone(); p.ExpandToEnclosingUnit(TextUnit.Paragraph); return p; }
+            catch { return null; }
+        }
+
+        private static bool SameParagraph(TextPatternRange para, TextPatternRange w)
+        {
+            if (para == null) return true;
+            try
+            {
+                return w.CompareEndpoints(TextPatternRangeEndpoint.Start, para, TextPatternRangeEndpoint.Start) >= 0 &&
+                       w.CompareEndpoints(TextPatternRangeEndpoint.Start, para, TextPatternRangeEndpoint.End) < 0;
+            }
+            catch { return true; }
+        }
+
+        private void StartReaderAt(Native.POINT p)
+        {
+            if (focusTp == null) return;
+            System.Windows.Point pt = new System.Windows.Point(p.X, p.Y);
+            TextPatternRange w;
+            try { w = focusTp.RangeFromPoint(pt); w.ExpandToEnclosingUnit(TextUnit.Word); }
+            catch { Log.Write("Reader: couldn't find a word at " + p.X + "," + p.Y); return; }
+            if (!InFocus(w)) { Log.Write("Reader: clicked word is outside the Focus area"); return; }
+            TextPatternRange next;
+            TextPatternRange chunk = BuildChunk(w, out next);
+            if (chunk == null) return;
+            readerChunk = chunk;
+            readerNext = next;
+            readerActive = true;
+            readerPaused = false;
+            readerNextTick = Environment.TickCount + StepMs();
+            ShowReaderChunk();
+            if (ttsOn) TtsSpeakFrom(w);
+            Log.Write("Reader: started" + (ttsOn ? " (read aloud)" : ""));
+        }
+
+        // Time on screen = the words in this step at your speed, plus the punctuation pause if the step ended at one.
+        private int StepMs()
+        {
+            int ms = Math.Max(80, lastChunkWords * 60000 / Math.Max(1, readerWpm));
+            if (lastChunkPara) return ms + readerPauseMs * 2;   // paragraph break: double pause
+            return lastChunkPunct ? ms + readerPauseMs : ms;
+        }
+        private bool lastChunkPara = false;
+        private int lastChunkWords = 1;
+        private bool lastChunkPunct = false;
+
+        // Commas, periods, semicolons, colons, ? and ! (also when followed by a closing quote or bracket).
+        private static bool EndsPhrase(string s)
+        {
+            if (s == null) return false;
+            string t = s.TrimEnd();
+            while (t.Length > 0 && "\"')]}\u201D\u2019".IndexOf(t[t.Length - 1]) >= 0) t = t.Substring(0, t.Length - 1);
+            if (t.Length == 0) return false;
+            return ",.;:!?\u2026".IndexOf(t[t.Length - 1]) >= 0;
+        }
+
+        private void AdvanceReader()
+        {
+            TextPatternRange next = null;
+            TextPatternRange chunk = readerNext == null ? null : BuildChunk(readerNext, out next);
+            if (chunk == null) { Log.Write("Reader: reached the end"); StopReaderWorker(); return; }
+            readerChunk = chunk;
+            readerNext = next;
+            readerNextTick = Environment.TickCount + StepMs();
+            ShowReaderChunk();
+        }
+
+        private void ShowReaderChunk()
+        {
+            System.Windows.Rect[] rs = readerChunk == null ? null : TextLinesOnly(readerChunk.GetBoundingRectangles());
+            try { readerOverlay.BeginInvoke(new Action(delegate { RenderReader(rs); })); } catch { }
+        }
+
+        private void StopReaderWorker()
+        {
+            TtsStopWorker();
+            readerChunk = null;
+            readerNext = null;
+            readerActive = false;
+            readerPaused = false;
+            try { readerOverlay.BeginInvoke(new Action(delegate { RenderReader(null); })); } catch { }
+        }
+
         private void ClearFocusWorker()
         {
+            StopReaderWorker();
             focusRanges = null;
             focusRoot = IntPtr.Zero;
             focusSig = "";
@@ -1695,6 +2652,7 @@ namespace WordFocus
                 List<TextPatternRange> runs = BuildPageRuns(start, column, winTop, winBottom, true);
                 if (runs.Count == 0) { Log.Write("Focus: no body text found"); ClearFocusWorker(); return; }
                 pageTp = pageTp0;
+                focusTp = pageTp0;
                 pageColumn = column;
                 lastPageBuild = Environment.TickCount;
                 pageRebuildPending = false;
@@ -1707,9 +2665,9 @@ namespace WordFocus
                 // in the middle of a paragraph don't cut it short. Fall back to the local text.
                 if (docTp != null && src != null && !IsDocument(src))
                 {
-                    try { range = docTp.RangeFromChild(src); } catch { range = null; }
+                    try { range = docTp.RangeFromChild(src); focusTp = docTp; } catch { range = null; }
                 }
-                if (range == null) range = tp.RangeFromPoint(pt);
+                if (range == null) { range = tp.RangeFromPoint(pt); focusTp = tp; }
                 range.ExpandToEnclosingUnit(TextUnit.Paragraph);
             }
 
@@ -1733,10 +2691,125 @@ namespace WordFocus
             Log.Write("Focus " + (kind == FocusPage ? "page" : "paragraph") + " via " + how);
         }
 
+        // ---- Reader drawing (UI thread): its own style and color, your highlight strength, solid ----
+        private void RenderReader(System.Windows.Rect[] rects)
+        {
+            if (rects == null || rects.Length == 0) { ClearOverlay(readerOverlay); return; }
+            double l = double.MaxValue, t = double.MaxValue, r = double.MinValue, b = double.MinValue;
+            foreach (System.Windows.Rect rc in rects)
+            {
+                l = Math.Min(l, rc.Left); t = Math.Min(t, rc.Top);
+                r = Math.Max(r, rc.Right); b = Math.Max(b, rc.Bottom);
+            }
+            int x0 = (int)Math.Floor(l) - 2, y0 = (int)Math.Floor(t) - 2;
+            int w0 = (int)Math.Ceiling(r) - x0 + 2, h0 = (int)Math.Ceiling(b) - y0 + 2;
+            if (w0 < 1 || h0 < 1 || w0 > 10000 || h0 > 10000) { ClearOverlay(readerOverlay); return; }
+            int st = readerStyle;
+            int alpha = strengthPercent * 255 / 100;
+            using (Bitmap bmp = new Bitmap(w0, h0, PixelFormat.Format32bppArgb))
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                Color lineColor = Color.Black;
+                if (st == StyleBoth) lineColor = IsDarkBehind(x0, y0, w0, h0) ? Color.White : Color.Black;
+                using (SolidBrush hb = new SolidBrush(Color.FromArgb(alpha, readerColor)))
+                using (SolidBrush lb = new SolidBrush(lineColor))
+                {
+                    foreach (System.Windows.Rect rc in rects)
+                    {
+                        RectangleF rf = new RectangleF((float)(rc.Left - x0) - 1, (float)(rc.Top - y0), (float)rc.Width + 2, (float)rc.Height);
+                        if (rf.Width < 1 || rf.Height < 1) continue;
+                        float thick = Math.Max(2f, rf.Height * 0.12f);
+                        RectangleF line = new RectangleF(rf.X, rf.Bottom - thick, rf.Width, thick);
+                        if (st == StyleHighlight || st == StyleBoth) g.FillRectangle(hb, rf);
+                        if (st == StyleUnderline) g.FillRectangle(hb, line);
+                        if (st == StyleBoth) g.FillRectangle(lb, line);
+                    }
+                }
+                readerOverlay.SetBitmap(bmp, x0, y0);
+                overlay.BringToTop(); // hover highlight stays on top
+            }
+        }
+
+        // ---- Modifier+click inside a Focus area starts / jumps the Reader (UI thread) ----
+        private System.Windows.Rect[] lastFocusRects;   // what the Focus layer is showing, for the click test
+        private IntPtr mouseHook = IntPtr.Zero;
+        private Native.LowLevelMouseProc mouseProc;      // kept in a field so it isn't garbage-collected
+        private bool swallowUp = false;
+        private uint mediaKeyState = 0;                  // 1 = Play/Pause registered
+
+        private bool ClickModHeld()
+        {
+            int vk = readerClickMod == 1 ? 0x11 : readerClickMod == 2 ? 0x12 : readerClickMod == 3 ? 0x10 : 0;
+            return vk != 0 && (Native.GetAsyncKeyState(vk) & 0x8000) != 0;
+        }
+
+        private bool InFocusRects(int x, int y)
+        {
+            System.Windows.Rect[] rs = lastFocusRects;
+            if (rs == null) return false;
+            foreach (System.Windows.Rect r in rs)
+            {
+                System.Windows.Rect g = r; g.Inflate(2, 3);
+                if (g.Contains(new System.Windows.Point(x, y))) return true;
+            }
+            return false;
+        }
+
+        private IntPtr MouseHookProc(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0)
+            {
+                int msg = wParam.ToInt32();
+                if (msg == 0x0201) // left button down
+                {
+                    Native.MSLLHOOKSTRUCT info = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
+                    if (ClickModHeld() && InFocusRects(info.pt.X, info.pt.Y))
+                    {
+                        readerRequestPt = info.pt;
+                        readerRequest = ReaderClick;
+                        swallowUp = true;
+                        return new IntPtr(1); // keep this click away from the app (no link opening / selecting)
+                    }
+                }
+                else if (msg == 0x0202 && swallowUp) { swallowUp = false; return new IntPtr(1); }
+            }
+            return Native.CallNextHookEx(mouseHook, nCode, wParam, lParam);
+        }
+
+        // Runs a few times a second: the mouse watch is only on while a Focus area is showing,
+        // and the Play/Pause key is only claimed while the Reader is running.
+        private void UpdateReaderHooks()
+        {
+            bool wantHook = focusKind != FocusNone && readerClickMod != 0;
+            if (wantHook && mouseHook == IntPtr.Zero)
+            {
+                if (mouseProc == null) mouseProc = MouseHookProc;
+                mouseHook = Native.SetWindowsHookEx(14, mouseProc, Native.GetModuleHandle(null), 0); // WH_MOUSE_LL
+            }
+            else if (!wantHook && mouseHook != IntPtr.Zero)
+            {
+                Native.UnhookWindowsHookEx(mouseHook);
+                mouseHook = IntPtr.Zero;
+                swallowUp = false;
+            }
+            bool wantMedia = readerActive;
+            if (wantMedia && mediaKeyState == 0)
+            {
+                if (Native.RegisterHotKey(hotkeys.Handle, 60, 0x4000, 0xB3)) mediaKeyState = 1; // VK_MEDIA_PLAY_PAUSE
+                else mediaKeyState = 2; // couldn't claim it; the "Reader: pause / resume" hotkey still works
+            }
+            else if (!wantMedia && mediaKeyState != 0)
+            {
+                if (mediaKeyState == 1) Native.UnregisterHotKey(hotkeys.Handle, 60);
+                mediaKeyState = 0;
+            }
+        }
+
         // ---- Focus layer drawing (UI thread) ----
         private void RenderFocus(System.Windows.Rect[] rects)
         {
-            if (rects == null || rects.Length == 0) { ClearOverlay(focusOverlay); return; }
+            if (rects == null || rects.Length == 0) { ClearOverlay(focusOverlay); lastFocusRects = null; return; }
             double l = double.MaxValue, t = double.MaxValue, r = double.MinValue, b = double.MinValue;
             foreach (System.Windows.Rect rc in rects)
             {
@@ -1770,6 +2843,8 @@ namespace WordFocus
                     }
                 }
                 focusOverlay.SetBitmap(bmp, x0, y0);
+                lastFocusRects = rects;
+                readerOverlay.BringToTop();
                 overlay.BringToTop(); // hover highlight stays above the Focus layer
             }
         }
